@@ -1,0 +1,14 @@
+[package]
+name = "wallset-render"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Short-lived video render process for wallSet. Spawned on demand, killed when the wallpaper is not visible."
+
+[dependencies]
+wallset-media = { workspace = true }
+wallset-surface = { workspace = true }
+
+[target."cfg(windows)".dependencies]
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }

@@ -1,0 +1,17 @@
+[package]
+name = "wallset-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Platform-agnostic types, resource policy engine and media fitness analysis for wallSet."
+
+[dependencies]
+serde = { workspace = true }
+
+[lints.rust]
+missing_debug_implementations = "warn"
+unsafe_code = "forbid"
+
+[dev-dependencies]
+serde_json = "1.0.154"

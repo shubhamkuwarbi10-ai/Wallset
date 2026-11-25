@@ -1,0 +1,13 @@
+[package]
+name = "wallset-media"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "libmpv binding (dynamically loaded), media probing and the shared render configuration for wallSet."
+
+[dependencies]
+wallset-core = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+libloading = "0.9.1"

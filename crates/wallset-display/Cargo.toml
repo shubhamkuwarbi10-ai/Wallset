@@ -1,0 +1,14 @@
+[package]
+name = "wallset-display"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Per-monitor display capability probing for wallSet."
+
+[dependencies]
+wallset-core = { workspace = true }
+thiserror = { workspace = true }
+
+[target."cfg(windows)".dependencies]
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Gdi", "Win32_Devices_Display", "Win32_UI_HiDpi", "Win32_UI_WindowsAndMessaging"] }

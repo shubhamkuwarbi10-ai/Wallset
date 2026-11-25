@@ -1,0 +1,14 @@
+/target
+/dist
+**/*.rs.bk
+*.pdb
+.DS_Store
+Thumbs.db
+# libmpv is a 116 MB binary (over GitHub's 100 MB limit) and is fetched
+# separately; keep only the note recording exactly which build was used.
+/vendor/*
+!/vendor/mpv/
+/vendor/mpv/*
+!/vendor/mpv/SOURCE.txt
+__pycache__/
+*.pyc

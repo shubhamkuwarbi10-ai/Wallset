@@ -1,0 +1,8 @@
+# Platform-neutral on purpose. On Windows, use the MSVC host
+# (`rustup set default-host x86_64-pc-windows-msvc`): windows-rs generates its
+# import libraries via raw-dylib, which on the GNU host needs a full x86-64
+# MinGW assembler that rustup does not ship.
+[toolchain]
+channel = "stable"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

@@ -1,0 +1,37 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/wallset-core",
+    "crates/wallset-display",
+    "crates/wallset-media",
+    "crates/wallset-surface",
+    "crates/wallset-cli",
+    "crates/wallset-render",
+    "crates/wallset-daemon",
+    "crates/wallset-ui",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MPL-2.0"
+
+[workspace.dependencies]
+wallset-core = { path = "crates/wallset-core" }
+wallset-display = { path = "crates/wallset-display" }
+wallset-media = { path = "crates/wallset-media" }
+wallset-surface = { path = "crates/wallset-surface" }
+
+serde = { version = "1.0.217", features = ["derive"] }
+thiserror = "2.0.11"
+
+# Release profile tuned for binary size and startup cost. A resident daemon
+# benefits far more from a small image (fewer pages faulted in, less working
+# set) than from aggressive inlining.
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
