@@ -1,38 +1,53 @@
 # Design
 
-The settings window (`crates/wallset-ui`) follows Windows 11. That is a product
-commitment (see PRODUCT.md), not a style choice to revisit casually.
+The settings window (`crates/wallset-ui`) is wallpaper-led: the wallpaper is
+the room. That is a product commitment (see PRODUCT.md), chosen by the user to
+replace the earlier Windows 11 Settings look.
 
 ## World
 
-- **Type:** Segoe UI and Segoe UI Semibold, with Segoe Fluent Icons (MDL2 on
-  Windows 10), all loaded from `%WINDIR%\Fonts` at runtime and never bundled.
-  WinUI ramp: Caption 12, Body 14, Subtitle 20 semibold, Title 28 semibold.
-- **Colour:** WinUI neutral tokens for light and dark (`theme.rs`), following the
-  Windows app theme. The one accent is the user's own Windows accent, read from
-  `AccentPalette` (Light 2 on dark, Dark 1 on light), falling back to Windows blue.
-  The accent marks only selection, the primary action, toggles that are on, and slider rails.
-- **Surfaces:** a flat base, cards at 8 px radius with a 1 px stroke, controls at
-  4 px. No shadows, no blur, no gradients.
+- **Backdrop:** the chosen file, else what the selected display shows now, else
+  the Windows wallpaper. Its Windows thumbnail (the same one Explorer shows,
+  so no decoder ships) is shrunk to 96 px wide, box-blurred, darkened (as if
+  under black at alpha 165) and stretched over the whole window. The title bar
+  is tinted to the backdrop's top edge. A file Windows cannot thumbnail gets a
+  plain dark backdrop.
+- **Black floor:** the darkened backdrop never goes below 40/255. Dark, smoothly
+  varying areas came out corrupted on the development machine's compositor
+  (OpenGL and Direct3D alike); a raised floor avoids it. Do not remove it
+  without re-testing on that kind of machine.
+- **Colour:** always dark. Panels are glass: near-black at about 60% opacity
+  with a white hairline. One accent, taken from the wallpaper (the dominant
+  hue, made light enough to carry black text), falling back to the Windows
+  accent. The accent marks selection, the primary action, toggles that are on
+  and slider rails.
+- **Type and icons:** Segoe UI and Segoe UI Semibold with Segoe Fluent Icons
+  (MDL2 on Windows 10), loaded from `%WINDIR%\Fonts`, never bundled. Ramp:
+  Caption 12, Body 14, Subtitle 20, Title 28.
+- **Surfaces:** panels 12 px radius (dock, details), cards 8 px, controls 4 px.
+  Text over pictures sits on a dark pill.
 
 ## Structure
 
-- Header: page title on the left, a SelectorBar (Wallpaper / Display /
-  Performance) on the right, then an InfoBar for the last result or error.
-- **Wallpaper** (default): the displays drawn to scale in their real arrangement
-  (click to choose one), then a preview at the display's aspect ratio, then a
-  command bar (Fill / Fit / Stretch, Preview, Apply). A side column holds the
-  file, its cost while visible (estimated, then measured during preview), and
-  the fit check.
+- Header: centred page switcher (Wallpaper / Display / Performance), then an
+  InfoBar for the last result or error.
+- **Wallpaper** (default): a large preview at the display's aspect ratio
+  showing the picture cropped exactly as the chosen fit mode will crop it, with
+  the display's name and an "On your desktop now" / "Not applied yet" chip.
+  Below it a dock: display tiles to scale (when there are several), Fill / Fit
+  / Stretch, Choose file, Preview, Apply. Below the dock one summary line: the
+  file, its cost, its fit, its format, and "Details", which opens a panel with
+  the cost (estimated, then measured during preview) and the fit check.
 - **Display:** the capability report as a settings list, gamut meters, and the
-  best files for this display.
-- **Performance:** status, then toggles and sliders in Windows Settings rows.
-  Each change saves at once and writes only its own section.
+  best files for this display, in a centred column.
+- **Performance:** status, then toggles and sliders in settings rows. Each
+  change saves at once and writes only its own section.
 
 ## Constraints
 
-- The preview is a native child window. Nothing may open over its rectangle: no
-  drop-downs, combo boxes or tooltips on the Wallpaper page's left column.
-  Choices there are segmented controls.
+- The preview is a native child window. Nothing may open over its rectangle:
+  no drop-downs, combo boxes or tooltips over it. Choices are segmented
+  controls.
 - Switching pages or displays stops the preview.
-- Repaint stays reactive. An idle window uses 0 CPU (measured: 0 ms CPU over 5 s).
+- Repaint stays reactive. The backdrop loads on a worker thread that wakes the
+  window once. An idle window uses 0 CPU (measured: 0 ms CPU over 5 s).

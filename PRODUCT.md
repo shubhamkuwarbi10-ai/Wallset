@@ -26,7 +26,7 @@ A settings window opened occasionally from the tray or Start menu, used for a mi
 - Resource settings: GPU decode, low-power scaling, power-saving GPU, efficiency mode, pause when covered, grace seconds, battery rules, start with Windows.
 
 ## Brand Commitments
-- Must feel like a Windows 11 app (user requirement): Windows 11 conventions, Segoe UI, rounded surfaces, native-feeling controls. Not a gaming or neon look.
+- Wallpaper-led (user choice, replacing the earlier "Windows 11 Settings" look): the wallpaper itself is the window's backdrop and the preview is the centrepiece; controls sit on it as quiet translucent panels. Still a Windows app underneath: Segoe UI, Fluent icons, Windows conventions. Not a gaming or neon look.
 - Name is written "wallSet".
 
 ## Evidence on Hand

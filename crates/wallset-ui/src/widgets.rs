@@ -1,4 +1,4 @@
-//! The few WinUI controls egui does not have: card, settings row, toggle
+//! The controls egui does not have: glass panel, settings row, toggle
 //! switch, segmented control, accent button, info bar. Each is drawn from
 //! the palette; none opens a popup (the preview is a native window that a
 //! popup would hide behind).
@@ -9,17 +9,22 @@ use eframe::egui::{
     StrokeKind, Ui, Vec2, vec2,
 };
 
-pub fn card<R>(ui: &mut Ui, p: &Palette, add: impl FnOnce(&mut Ui) -> R) -> R {
+/// A translucent panel over the blurred wallpaper, full width.
+pub fn glass<R>(ui: &mut Ui, p: &Palette, margin: Margin, radius: u8, add: impl FnOnce(&mut Ui) -> R) -> R {
     Frame::new()
         .fill(p.card)
         .stroke(Stroke::new(1.0_f32, p.card_stroke))
-        .corner_radius(CornerRadius::same(8))
-        .inner_margin(Margin::symmetric(16, 14))
+        .corner_radius(CornerRadius::same(radius))
+        .inner_margin(margin)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             add(ui)
         })
         .inner
+}
+
+pub fn card<R>(ui: &mut Ui, p: &Palette, add: impl FnOnce(&mut Ui) -> R) -> R {
+    glass(ui, p, Margin::symmetric(16, 14), 8, add)
 }
 
 /// A group of settings rows in one card, separated by hairlines, the way
@@ -122,7 +127,7 @@ pub fn toggle(ui: &mut Ui, p: &Palette, on: &mut bool) -> Response {
 pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, p: &Palette, value: &mut T, items: &[(T, &str)]) -> bool {
     let mut changed = false;
     Frame::new()
-        .fill(p.subtle)
+        .fill(Color32::from_black_alpha(90))
         .stroke(Stroke::new(1.0_f32, p.card_stroke))
         .corner_radius(CornerRadius::same(6))
         .inner_margin(Margin::same(2))
@@ -221,6 +226,19 @@ fn button_impl(ui: &mut Ui, p: &Palette, glyph: Option<char>, text: &str, enable
     if enabled { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp }
 }
 
+/// A borderless text button with a trailing glyph ("Details ⌄").
+pub fn text_button(ui: &mut Ui, p: &Palette, glyph: char, text: &str) -> Response {
+    let galley = ui.painter().layout_no_wrap(text.to_string(), theme::font(theme::CAPTION), Color32::PLACEHOLDER);
+    let (rect, resp) = ui.allocate_exact_size(galley.size() + vec2(34.0, 8.0), Sense::click());
+    if resp.hovered() {
+        ui.painter().rect_filled(rect, CornerRadius::same(4), p.subtle_hover);
+    }
+    let fg = if resp.hovered() { p.text } else { p.text2 };
+    ui.painter().galley(egui::pos2(rect.left() + 8.0, rect.center().y - galley.size().y / 2.0), galley, fg);
+    ui.painter().text(egui::pos2(rect.right() - 8.0, rect.center().y), Align2::RIGHT_CENTER, glyph, theme::icon_font(10.0), fg);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 /// A borderless icon-only button (close, copy).
 pub fn icon_button(ui: &mut Ui, p: &Palette, glyph: char, size: f32) -> Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size + 14.0), Sense::click());
@@ -267,7 +285,7 @@ pub fn info_bar(ui: &mut Ui, p: &Palette, tone: Tone, message: &str) -> bool {
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                status_icon(ui, glyph, fg, p);
+                status_icon(ui, glyph, fg);
                 ui.add_space(4.0);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     closed = icon_button(ui, p, icon::CLOSE, 10.0).clicked();
@@ -281,11 +299,10 @@ pub fn info_bar(ui: &mut Ui, p: &Palette, tone: Tone, message: &str) -> bool {
 }
 
 /// The filled circle WinUI uses for InfoBar and status glyphs.
-pub fn status_icon(ui: &mut Ui, glyph: char, color: Color32, p: &Palette) {
+pub fn status_icon(ui: &mut Ui, glyph: char, color: Color32) {
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
     ui.painter().circle_filled(rect.center(), 8.0, color);
-    let fg = if p.dark { Color32::BLACK } else { Color32::WHITE };
-    ui.painter().text(rect.center(), Align2::CENTER_CENTER, glyph, theme::icon_font(9.0), fg);
+    ui.painter().text(rect.center(), Align2::CENTER_CENTER, glyph, theme::icon_font(9.0), Color32::BLACK);
 }
 
 /// A thin labelled meter, for gamut coverage.

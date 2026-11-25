@@ -1,9 +1,12 @@
-//! Windows 11 look: Segoe UI and Segoe Fluent Icons loaded from the system
-//! (never bundled: they are not ours to redistribute), WinUI colour tokens,
-//! and the user's own accent colour. Light or dark follows Windows.
+//! The look: the wallpaper is the room. The window's background is the
+//! chosen (or current) wallpaper, blurred and darkened; controls sit on it as
+//! translucent panels. Always dark, because the backdrop is darkened for
+//! contrast. Type and icons are Windows' own (Segoe UI, Segoe Fluent Icons),
+//! loaded from the system and never bundled. The accent is taken from the
+//! wallpaper, falling back to the user's Windows accent.
 
 use eframe::egui::{
-    self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Stroke, Theme, Visuals,
+    self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Stroke, Visuals,
 };
 use std::sync::Arc;
 
@@ -15,6 +18,14 @@ pub const CAPTION: f32 = 12.0;
 pub const BODY: f32 = 14.0;
 pub const SUBTITLE: f32 = 20.0;
 pub const TITLE: f32 = 28.0;
+
+/// How much the blurred wallpaper is darkened (0-255), as if covered by
+/// black at this alpha. At 165, white text keeps about 5:1 contrast even
+/// over a pure white picture.
+pub const SCRIM: u8 = 165;
+
+/// Darkest value the backdrop may reach (see `backdrop::load`).
+pub const BLACK_FLOOR: u8 = 40;
 
 /// Segoe Fluent Icons code points.
 pub mod icon {
@@ -32,16 +43,19 @@ pub mod icon {
     pub const DELETE: char = '\u{E74D}';
     pub const CLOSE: char = '\u{E711}';
     pub const POWER: char = '\u{E7E8}';
-    pub const BATTERY: char = '\u{E83F}';
+    pub const BATTERY: char = '\u{EBAA}';
+    pub const BATTERY_LOW: char = '\u{EBA3}';
+    pub const MEMORY: char = '\u{E964}';
     pub const SPEED: char = '\u{EC4A}';
     pub const PAUSE: char = '\u{E769}';
-    pub const LEAF: char = '\u{EC0A}';
+    pub const LEAF: char = '\u{E8BE}';
     pub const CHIP: char = '\u{E950}';
+    pub const CHEVRON_DOWN: char = '\u{E70D}';
+    pub const CHEVRON_UP: char = '\u{E70E}';
 }
 
 #[derive(Clone, Copy)]
 pub struct Palette {
-    pub dark: bool,
     pub bg: Color32,
     pub card: Color32,
     pub card_stroke: Color32,
@@ -65,59 +79,34 @@ pub struct Palette {
 }
 
 impl Palette {
-    pub fn get(ctx: &egui::Context) -> Self {
-        Self::of(ctx.theme())
-    }
-
-    fn of(theme: Theme) -> Self {
-        let accent = accent_colors();
-        match theme {
-            Theme::Dark => Self {
-                dark: true,
-                bg: hex(0x202020),
-                card: hex(0x2B2B2B),
-                card_stroke: hex(0x1D1D1D),
-                subtle: hex(0x272727),
-                subtle_hover: hex(0x323232),
-                control: hex(0x2D2D2D),
-                control_hover: hex(0x343434),
-                control_stroke: hex(0x3B3B3B),
-                text: hex(0xFFFFFF),
-                text2: hex(0xC8C8C8),
-                text3: hex(0x9D9D9D),
-                accent: accent.0,
-                on_accent: hex(0x000000),
-                success: hex(0x6CCB5F),
-                caution: hex(0xFCE100),
-                critical: hex(0xFF99A4),
-                success_bg: hex(0x393D1B),
-                caution_bg: hex(0x433519),
-                critical_bg: hex(0x442726),
-                preview_bg: hex(0x161616),
-            },
-            Theme::Light => Self {
-                dark: false,
-                bg: hex(0xF3F3F3),
-                card: hex(0xFBFBFB),
-                card_stroke: hex(0xE5E5E5),
-                subtle: hex(0xEBEBEB),
-                subtle_hover: hex(0xE3E3E3),
-                control: hex(0xFDFDFD),
-                control_hover: hex(0xF5F5F5),
-                control_stroke: hex(0xD6D6D6),
-                text: hex(0x1A1A1A),
-                text2: hex(0x5C5C5C),
-                text3: hex(0x767676),
-                accent: accent.1,
-                on_accent: hex(0xFFFFFF),
-                success: hex(0x0F7B0F),
-                caution: hex(0x9D5D00),
-                critical: hex(0xC42B1C),
-                success_bg: hex(0xDFF6DD),
-                caution_bg: hex(0xFFF4CE),
-                critical_bg: hex(0xFDE7E9),
-                preview_bg: hex(0x1F1F1F),
-            },
+    /// Glass over the darkened wallpaper. `accent` comes from the wallpaper;
+    /// `None` uses the Windows accent.
+    pub fn new(accent: Option<Color32>) -> Self {
+        let tint = |rgb: u32, a: u8| {
+            let c = hex(rgb);
+            Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), a)
+        };
+        Self {
+            bg: hex(0x16171A),
+            card: tint(0x121214, 150),
+            card_stroke: Color32::from_white_alpha(22),
+            subtle: Color32::from_white_alpha(14),
+            subtle_hover: Color32::from_white_alpha(26),
+            control: Color32::from_white_alpha(22),
+            control_hover: Color32::from_white_alpha(34),
+            control_stroke: Color32::from_white_alpha(30),
+            text: hex(0xFFFFFF),
+            text2: hex(0xD4D4D4),
+            text3: hex(0xA6A6A6),
+            accent: accent.unwrap_or_else(windows_accent),
+            on_accent: hex(0x000000),
+            success: hex(0x6CCB5F),
+            caution: hex(0xFCE100),
+            critical: hex(0xFF99A4),
+            success_bg: tint(0x6CCB5F, 38),
+            caution_bg: tint(0xFCE100, 34),
+            critical_bg: tint(0xFF6A7A, 44),
+            preview_bg: Color32::from_black_alpha(150),
         }
     }
 }
@@ -138,12 +127,11 @@ pub fn icon_font(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name(ICONS.into()))
 }
 
-/// Install fonts and both themes' visuals once at startup.
-pub fn install(ctx: &egui::Context) {
+/// Install fonts, dark visuals and spacing once at startup.
+pub fn install(ctx: &egui::Context, p: &Palette) {
     install_fonts(ctx);
-    for theme in [Theme::Dark, Theme::Light] {
-        ctx.set_visuals_of(theme, visuals(Palette::of(theme)));
-    }
+    ctx.options_mut(|o| o.theme_preference = egui::ThemePreference::Dark);
+    set_palette(ctx, p);
     ctx.all_styles_mut(|s| {
         s.spacing.item_spacing = egui::vec2(8.0, 6.0);
         s.spacing.button_padding = egui::vec2(12.0, 5.0);
@@ -157,15 +145,22 @@ pub fn install(ctx: &egui::Context) {
     });
 }
 
-fn visuals(p: Palette) -> Visuals {
-    let mut v = if p.dark { Visuals::dark() } else { Visuals::light() };
+/// Re-apply visuals, e.g. when a new wallpaper changes the accent.
+pub fn set_palette(ctx: &egui::Context, p: &Palette) {
+    ctx.set_visuals_of(egui::Theme::Dark, visuals(p));
+}
+
+fn visuals(p: &Palette) -> Visuals {
+    let mut v = Visuals::dark();
     v.panel_fill = p.bg;
-    v.window_fill = p.card;
+    // Tooltips and menus stay opaque: small text on glass reads badly.
+    v.window_fill = hex(0x2B2B2B);
+    v.window_stroke = Stroke::new(1.0_f32, hex(0x3B3B3B));
     v.extreme_bg_color = p.subtle;
     v.faint_bg_color = p.subtle;
     v.override_text_color = Some(p.text);
     v.hyperlink_color = p.accent;
-    // Slider rail, text selection and focus all take the accent, as in WinUI.
+    // Slider rail, text selection and focus take the accent.
     v.selection.bg_fill = p.accent;
     v.selection.stroke = Stroke::new(1.5_f32, p.text);
     v.text_cursor.stroke = Stroke::new(1.5_f32, p.accent);
@@ -177,7 +172,7 @@ fn visuals(p: Palette) -> Visuals {
         (&mut v.widgets.noninteractive, p.card),
         (&mut v.widgets.inactive, p.control),
         (&mut v.widgets.hovered, p.control_hover),
-        (&mut v.widgets.active, p.subtle),
+        (&mut v.widgets.active, p.subtle_hover),
         (&mut v.widgets.open, p.control),
     ] {
         w.corner_radius = CornerRadius::same(4);
@@ -187,6 +182,9 @@ fn visuals(p: Palette) -> Visuals {
         w.bg_stroke = Stroke::new(1.0_f32, p.control_stroke);
         w.fg_stroke = Stroke::new(1.0_f32, p.text);
     }
+    // The slider rail is painted in the inactive fill: keep its unfilled part
+    // visible on glass.
+    v.widgets.inactive.bg_fill = Color32::from_white_alpha(60);
     v.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, p.card_stroke);
     v.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, p.text2);
     v.widgets.active.fg_stroke = Stroke::new(1.0_f32, p.text2);
@@ -227,15 +225,15 @@ fn install_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
-/// (dark-theme accent, light-theme accent) from the user's Windows accent
-/// palette, picked as WinUI does: Light 2 on dark, Dark 1 on light.
-fn accent_colors() -> (Color32, Color32) {
-    static CACHE: std::sync::OnceLock<(Color32, Color32)> = std::sync::OnceLock::new();
-    *CACHE.get_or_init(|| read_accent_palette().unwrap_or((hex(0x60CDFF), hex(0x005FB8))))
+/// The user's Windows accent: Light 2 from the accent palette (what WinUI
+/// uses on dark backgrounds), or Windows blue.
+fn windows_accent() -> Color32 {
+    static CACHE: std::sync::OnceLock<Color32> = std::sync::OnceLock::new();
+    *CACHE.get_or_init(|| read_accent_palette().unwrap_or(hex(0x60CDFF)))
 }
 
 #[cfg(windows)]
-fn read_accent_palette() -> Option<(Color32, Color32)> {
+fn read_accent_palette() -> Option<Color32> {
     use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_BINARY, RegGetValueW};
     use windows::core::w;
     let mut buf = [0u8; 32];
@@ -252,14 +250,11 @@ fn read_accent_palette() -> Option<(Color32, Color32)> {
             Some(&mut len),
         )
     };
-    (status.is_ok() && len == 32).then(|| {
-        let c = |i: usize| Color32::from_rgb(buf[i * 4], buf[i * 4 + 1], buf[i * 4 + 2]);
-        (c(1), c(4))
-    })
+    (status.is_ok() && len == 32).then(|| Color32::from_rgb(buf[4], buf[5], buf[6]))
 }
 
 #[cfg(not(windows))]
-fn read_accent_palette() -> Option<(Color32, Color32)> {
+fn read_accent_palette() -> Option<Color32> {
     None
 }
 

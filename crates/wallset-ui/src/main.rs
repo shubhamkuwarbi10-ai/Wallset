@@ -7,13 +7,14 @@
 
 #![cfg_attr(not(test), windows_subsystem = "windows")]
 
+mod backdrop;
 mod preview;
 mod service;
 mod theme;
 mod widgets;
 
 use eframe::egui::{
-    self, Align, Align2, CornerRadius, Frame, Layout, Margin, RichText, Sense, Stroke, StrokeKind, Ui, vec2,
+    self, Align, Align2, Color32, CornerRadius, Frame, Layout, Margin, RichText, Sense, Stroke, StrokeKind, Ui, vec2,
 };
 use preview::Preview;
 use std::path::PathBuf;
@@ -21,7 +22,7 @@ use std::sync::{Arc, mpsc};
 use std::time::Duration;
 use theme::{Palette, icon};
 use wallset_core::fitness::{self, FitnessReport, Severity};
-use wallset_core::media::{MediaKind, MediaProbe};
+use wallset_core::media::MediaProbe;
 use wallset_core::{Assignment, Config, FitMode, Monitor};
 use widgets::Tone;
 
@@ -44,7 +45,7 @@ fn main() -> eframe::Result {
         "wallSet",
         options,
         Box::new(|cc| {
-            theme::install(&cc.egui_ctx);
+            theme::install(&cc.egui_ctx, &Palette::new(None));
             Ok(Box::new(App::new().with_args()))
         }),
     )
@@ -62,8 +63,22 @@ struct Chosen {
     report: FitnessReport,
 }
 
+/// The wallpaper picture behind the window, and its accent colour.
+#[derive(Default)]
+struct Backdrop {
+    started: bool,
+    path: Option<PathBuf>,
+    pending: Option<mpsc::Receiver<Option<backdrop::Art>>>,
+    poster: Option<egui::TextureHandle>,
+    blurred: Option<egui::TextureHandle>,
+    accent: Option<Color32>,
+}
+
 struct App {
     page: Page,
+    backdrop: Backdrop,
+    /// The cost and fit panel under the preview is open.
+    details: bool,
     monitors: Vec<Monitor>,
     selected: usize,
     cfg: Config,
@@ -94,6 +109,8 @@ impl App {
         let status = monitor_error.map(|e| (Tone::Critical, format!("Cannot read your displays: {e}")));
         Self {
             page: Page::Wallpaper,
+            backdrop: Backdrop::default(),
+            details: false,
             monitors,
             selected: 0,
             cfg,
@@ -239,7 +256,78 @@ impl App {
     }
 }
 
+impl App {
+    fn palette(&self) -> Palette {
+        Palette::new(self.backdrop.accent)
+    }
+
+    /// The picture behind everything: the chosen file, else what this
+    /// display shows now, else the Windows wallpaper. Loaded on a worker
+    /// thread that wakes the window when done, so nothing polls.
+    fn sync_backdrop(&mut self, ctx: &egui::Context) {
+        let want = self.chosen.as_ref().map(|c| c.probe.path.clone()).or_else(|| {
+            let m = self.monitor()?;
+            self.cfg.assignment_for(&m.id).map(|a| a.path.clone()).or_else(backdrop::windows_wallpaper)
+        });
+        if !self.backdrop.started || want != self.backdrop.path {
+            self.backdrop.started = true;
+            self.backdrop.path = want.clone();
+            // The old picture must never stand in for a different file.
+            self.backdrop.poster = None;
+            self.backdrop.pending = want.map(|path| {
+                let (tx, rx) = mpsc::channel();
+                let ctx = ctx.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(backdrop::load(&path));
+                    ctx.request_repaint();
+                });
+                rx
+            });
+            if self.backdrop.pending.is_none() {
+                self.set_art(ctx, None);
+            }
+        }
+        if let Some(rx) = &self.backdrop.pending {
+            match rx.try_recv() {
+                Ok(art) => {
+                    self.backdrop.pending = None;
+                    self.set_art(ctx, art);
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.backdrop.pending = None;
+                    self.set_art(ctx, None);
+                }
+            }
+        }
+    }
+
+    fn set_art(&mut self, ctx: &egui::Context, art: Option<backdrop::Art>) {
+        let b = &mut self.backdrop;
+        b.accent = art.as_ref().and_then(|a| a.accent);
+        let p = Palette::new(b.accent);
+        // The title bar continues the backdrop's top edge.
+        let title = art.as_ref().map_or(p.bg, |a| backdrop::top_color(&a.blurred));
+        match art {
+            Some(a) => {
+                b.poster = Some(ctx.load_texture("poster", a.poster, egui::TextureOptions::LINEAR));
+                b.blurred = Some(ctx.load_texture("backdrop", a.blurred, egui::TextureOptions::LINEAR));
+            }
+            None => (b.poster, b.blurred) = (None, None),
+        }
+        theme::set_palette(ctx, &p);
+        if let Some(h) = self.hwnd {
+            backdrop::tint_title_bar(h, title);
+        }
+    }
+}
+
 impl eframe::App for App {
+    /// Opaque: eframe's default clear colour is translucent.
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        [0.0, 0.0, 0.0, 1.0]
+    }
+
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         if self.hwnd.is_none() {
             self.hwnd = native_hwnd(frame);
@@ -252,15 +340,24 @@ impl eframe::App for App {
             self.page = Page::Wallpaper;
             self.inspect(path);
         }
-        let p = Palette::get(ctx);
+        self.sync_backdrop(ctx);
+        let p = self.palette();
+
+        // The room: the wallpaper, blurred and darkened, under everything.
+        let screen = ctx.content_rect();
+        let bg = ctx.layer_painter(egui::LayerId::background());
+        bg.rect_filled(screen, CornerRadius::ZERO, p.bg);
+        if let Some(t) = &self.backdrop.blurred {
+            bg.image(t.id(), screen, backdrop::cover_uv(t.size_vec2(), screen.size()), Color32::WHITE);
+        }
 
         egui::TopBottomPanel::top("header")
-            .frame(Frame::new().fill(p.bg).inner_margin(Margin { left: 28, right: 28, top: 18, bottom: 6 }))
+            .frame(Frame::new().inner_margin(Margin { left: 24, right: 24, top: 14, bottom: 4 }))
             .show_separator_line(false)
             .show(ctx, |ui| self.header(ui, &p));
 
         egui::CentralPanel::default()
-            .frame(Frame::new().fill(p.bg).inner_margin(Margin { left: 28, right: 28, top: 10, bottom: 20 }))
+            .frame(Frame::new().inner_margin(Margin { left: 24, right: 24, top: 10, bottom: 18 }))
             .show(ctx, |ui| match self.page {
                 Page::Wallpaper => self.wallpaper_page(ui, ctx, &p),
                 Page::Display => scroll_page(ui, |ui| self.display_page(ui, &p)),
@@ -269,48 +366,70 @@ impl eframe::App for App {
     }
 }
 
+/// A centred column for the settings-style pages.
 fn scroll_page(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
     egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
-        ui.set_max_width(880.0);
-        add(ui);
-        ui.add_space(12.0);
+        let w = ui.available_width().min(820.0);
+        ui.horizontal_top(|ui| {
+            ui.add_space(((ui.available_width() - w) / 2.0).max(0.0));
+            ui.vertical(|ui| {
+                ui.set_width(w);
+                add(ui);
+                ui.add_space(12.0);
+            });
+        });
     });
+}
+
+/// Centre content whose width is only known once laid out: use last pass's
+/// width, and ask egui for another pass when it changed.
+fn centered<R>(ui: &mut Ui, salt: &str, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let id = ui.id().with(salt);
+    let known: f32 = ui.data(|d| d.get_temp(id)).unwrap_or(0.0);
+    let left = ((ui.available_width() - known) / 2.0).max(0.0);
+    let r = ui.horizontal(|ui| {
+        ui.add_space(left);
+        ui.scope(add)
+    });
+    let used = r.inner.response.rect.width();
+    if (used - known).abs() > 0.5 {
+        ui.data_mut(|d| d.insert_temp(id, used));
+        ui.ctx().request_discard("centring");
+    }
+    r.inner.inner
 }
 
 // --- Header ---------------------------------------------------------------
 
 impl App {
     fn header(&mut self, ui: &mut Ui, p: &Palette) {
-        ui.horizontal(|ui| {
-            let title = match self.page {
-                Page::Wallpaper => "Wallpaper",
-                Page::Display => "Display",
-                Page::Performance => "Performance",
-            };
-            ui.label(RichText::new(title).font(theme::strong(theme::TITLE)));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let mut page = self.page;
-                // Laid out right to left, so listed in reverse.
-                for (value, label) in [
-                    (Page::Performance, "Performance"),
-                    (Page::Display, "Display"),
-                    (Page::Wallpaper, "Wallpaper"),
-                ] {
-                    if selector_item(ui, p, label, page == value) {
-                        page = value;
-                    }
-                }
-                if page != self.page {
-                    // The preview is a native window; it must not float over
-                    // another page.
-                    self.preview = None;
-                    self.page = page;
-                }
-            });
+        let mut page = self.page;
+        centered(ui, "tabs", |ui| {
+            widgets::segmented(
+                ui,
+                p,
+                &mut page,
+                &[(Page::Wallpaper, "Wallpaper"), (Page::Display, "Display"), (Page::Performance, "Performance")],
+            )
         });
+        if page != self.page {
+            // The preview is a native window; it must not float over
+            // another page.
+            self.preview = None;
+            self.page = page;
+        }
         if let Some((tone, msg)) = &self.status {
             ui.add_space(10.0);
-            if widgets::info_bar(ui, p, *tone, msg) {
+            let w = ui.available_width().min(760.0);
+            let mut closed = false;
+            ui.horizontal(|ui| {
+                ui.add_space(((ui.available_width() - w) / 2.0).max(0.0));
+                ui.vertical(|ui| {
+                    ui.set_width(w);
+                    closed = widgets::info_bar(ui, p, *tone, msg);
+                });
+            });
+            if closed {
                 self.status = None;
             }
         }
@@ -318,25 +437,11 @@ impl App {
     }
 }
 
-/// One WinUI SelectorBar item: text, with an accent pill under the
-/// selected one.
-fn selector_item(ui: &mut Ui, p: &Palette, label: &str, selected: bool) -> bool {
-    let font = if selected { theme::strong(theme::BODY) } else { theme::font(theme::BODY) };
-    let galley = ui.painter().layout_no_wrap(label.to_string(), font, egui::Color32::PLACEHOLDER);
-    let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 24.0, 36.0), Sense::click());
-    if resp.hovered() && !selected {
-        ui.painter().rect_filled(rect.shrink2(vec2(0.0, 2.0)), CornerRadius::same(4), p.subtle_hover);
-    }
-    let color = if selected || resp.hovered() { p.text } else { p.text2 };
-    ui.painter().galley(rect.center() - galley.size() / 2.0 - vec2(0.0, 2.0), galley, color);
-    if selected {
-        let pill = egui::Rect::from_center_size(egui::pos2(rect.center().x, rect.bottom() - 3.0), vec2(16.0, 3.0));
-        ui.painter().rect_filled(pill, CornerRadius::same(2), p.accent);
-    }
-    resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() && !selected
-}
-
 // --- Wallpaper page -------------------------------------------------------
+
+const DOCK_H: f32 = 52.0;
+const SUMMARY_H: f32 = 24.0;
+const DETAILS_H: f32 = 236.0;
 
 impl App {
     fn wallpaper_page(&mut self, ui: &mut Ui, ctx: &egui::Context, p: &Palette) {
@@ -344,108 +449,58 @@ impl App {
             ui.label("No displays found.");
             return;
         };
-        let side_w = 330.0;
-        let gap = 24.0;
+        let open = self.details && self.chosen.is_some();
+        // Every row also adds the item spacing below it.
+        let rows = if open { 4.0 } else { 3.0 };
+        let below = 14.0 + DOCK_H + 10.0 + SUMMARY_H + if open { 12.0 + DETAILS_H } else { 0.0 }
+            + rows * ui.spacing().item_spacing.y
+            + 4.0;
         let avail = ui.available_size();
-        let main_w = (avail.x - side_w - gap).max(360.0);
+        // The preview keeps the display's aspect ratio, so what it crops is
+        // what the wallpaper will crop.
+        let aspect = m.aspect_ratio().max(0.5) as f32;
+        let max_h = (avail.y - below).max(150.0);
+        let w = avail.x.min(1400.0);
+        let mut size = vec2(w, w / aspect);
+        if size.y > max_h {
+            size = vec2(max_h * aspect, max_h);
+        }
+        // The bars need room for their controls even when the preview is
+        // short and narrow.
+        let bar_w = size.x.max(avail.x.min(680.0));
+        let indent = |ui: &mut Ui, width: f32| ui.add_space(((avail.x - width) / 2.0).max(0.0));
 
-        ui.horizontal_top(|ui| {
-            ui.allocate_ui_with_layout(vec2(main_w, avail.y), Layout::top_down(Align::Min), |ui| {
-                self.display_strip(ui, p, &m);
-                ui.add_space(12.0);
-                // The preview keeps the display's aspect ratio, so cropping is
-                // truthful; it shrinks to leave room for the command bar.
-                let max_h = (ui.available_height() - 56.0).max(140.0);
-                let aspect = m.aspect_ratio().max(0.5) as f32;
-                let mut size = vec2(main_w, main_w / aspect);
-                if size.y > max_h {
-                    size = vec2(max_h * aspect, max_h);
-                }
-                self.preview_area(ui, ctx, p, size);
-                ui.add_space(12.0);
-                ui.allocate_ui_with_layout(vec2(size.x, 32.0), Layout::left_to_right(Align::Center), |ui| {
-                    self.command_bar(ui, p, &m);
-                });
-            });
-            ui.add_space(gap);
-            ui.allocate_ui_with_layout(vec2(side_w, avail.y), Layout::top_down(Align::Min), |ui| {
-                egui::ScrollArea::vertical().id_salt("side").auto_shrink([false; 2]).show(ui, |ui| {
-                    ui.spacing_mut().item_spacing.y = 12.0;
-                    self.file_card(ui, p, &m);
-                    self.cost_card(ui, p);
-                    self.fit_card(ui, p, &m);
-                });
-            });
-        });
-    }
-
-    /// The displays drawn to scale in their real arrangement, the way
-    /// Windows' own Display settings shows them. Click one to choose it.
-    fn display_strip(&mut self, ui: &mut Ui, p: &Palette, m: &Monitor) {
-        let mut clicked = None;
         ui.horizontal(|ui| {
-            let (x0, y0, x1, y1) = self.monitors.iter().fold((i32::MAX, i32::MAX, i32::MIN, i32::MIN), |a, m| {
-                let b = &m.bounds;
-                (a.0.min(b.x), a.1.min(b.y), a.2.max(b.x + b.width as i32), a.3.max(b.y + b.height as i32))
-            });
-            let (w, h) = ((x1 - x0).max(1) as f32, (y1 - y0).max(1) as f32);
-            let scale = (52.0 / h).min(220.0 / w);
-            let (area, _) = ui.allocate_exact_size(vec2(w * scale, h * scale), Sense::hover());
-            for (i, mon) in self.monitors.iter().enumerate() {
-                let b = &mon.bounds;
-                let r = egui::Rect::from_min_size(
-                    area.min + vec2((b.x - x0) as f32 * scale, (b.y - y0) as f32 * scale),
-                    vec2(b.width as f32 * scale, b.height as f32 * scale),
-                )
-                .shrink(2.0);
-                let resp = ui.interact(r, ui.id().with(("tile", i)), Sense::click());
-                let sel = i == self.selected;
-                let fill = if sel {
-                    p.accent.gamma_multiply(if p.dark { 0.35 } else { 0.2 })
-                } else if resp.hovered() {
-                    p.subtle_hover
-                } else {
-                    p.subtle
-                };
-                let stroke = if sel { Stroke::new(2.0_f32, p.accent) } else { Stroke::new(1.0_f32, p.control_stroke) };
-                ui.painter().rect(r, CornerRadius::same(4), fill, stroke, StrokeKind::Inside);
-                ui.painter().text(r.center(), Align2::CENTER_CENTER, (i + 1).to_string(), theme::strong(16.0), p.text);
-                if resp.clicked() {
-                    clicked = Some(i);
-                }
-            }
-            ui.add_space(10.0);
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing.y = 2.0;
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(&m.friendly_name).font(theme::strong(theme::BODY)));
-                    if m.is_primary {
-                        widgets::badge(ui, "Primary", p.text2, p.subtle);
-                    }
-                });
-                let mode = m.current_mode;
-                ui.label(
-                    RichText::new(format!("{} × {} · {:.0} Hz", mode.width, mode.height, mode.refresh_hz))
-                        .font(theme::font(theme::CAPTION))
-                        .color(p.text2),
-                );
-                let now = self.cfg.assignment_for(&m.id).map_or_else(
-                    || "Showing the Windows wallpaper".to_string(),
-                    |a| format!("Showing {}", file_name(&a.path)),
-                );
-                ui.add(egui::Label::new(RichText::new(now).font(theme::font(theme::CAPTION)).color(p.text3)).truncate());
+            indent(ui, size.x);
+            self.preview_area(ui, ctx, p, size, &m);
+        });
+        ui.add_space(14.0);
+        ui.horizontal(|ui| {
+            indent(ui, bar_w);
+            ui.allocate_ui_with_layout(vec2(bar_w, DOCK_H), Layout::top_down(Align::Min), |ui| self.dock(ui, p));
+        });
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            indent(ui, bar_w);
+            ui.allocate_ui_with_layout(vec2(bar_w, SUMMARY_H), Layout::left_to_right(Align::Center), |ui| {
+                ui.set_width(bar_w);
+                self.summary(ui, p, &m);
             });
         });
-        if let Some(i) = clicked {
-            self.select_monitor(i);
+        if open {
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                indent(ui, bar_w);
+                ui.allocate_ui_with_layout(vec2(bar_w, DETAILS_H), Layout::top_down(Align::Min), |ui| {
+                    self.details_panel(ui, p, &m);
+                });
+            });
         }
     }
 
-    fn preview_area(&mut self, ui: &mut Ui, ctx: &egui::Context, p: &Palette, size: egui::Vec2) {
+    fn preview_area(&mut self, ui: &mut Ui, ctx: &egui::Context, p: &Palette, size: egui::Vec2, m: &Monitor) {
         let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
         let hovering_file = ctx.input(|i| !i.raw.hovered_files.is_empty());
-        let painter = ui.painter();
-        painter.rect_filled(rect, CornerRadius::same(8), p.preview_bg);
         let ppp = ctx.pixels_per_point();
         let px = (
             (rect.min.x * ppp).round() as i32,
@@ -453,6 +508,7 @@ impl App {
             (rect.width() * ppp).round() as u32,
             (rect.height() * ppp).round() as u32,
         );
+        ui.painter().rect_filled(rect, CornerRadius::same(10), p.preview_bg);
 
         if self.pending_preview && self.preview.is_none() && self.hwnd.is_some() && self.chosen.is_some() {
             self.pending_preview = false;
@@ -469,146 +525,238 @@ impl App {
             return;
         }
 
-        // Everything below is drawn on the dark preview ground in both themes.
-        let (light, dim) = (egui::Color32::from_gray(240), egui::Color32::from_gray(160));
+        // The still picture, cropped exactly as the chosen fit mode will.
+        if let Some(t) = &self.backdrop.poster {
+            let img = t.size_vec2();
+            let full = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+            let (r, uv, radius) = match self.fit {
+                FitMode::Fill => (rect, backdrop::cover_uv(img, rect.size()), 10),
+                FitMode::Stretch => (rect, full, 10),
+                FitMode::Fit => {
+                    let s = (rect.width() / img.x).min(rect.height() / img.y);
+                    (egui::Rect::from_center_size(rect.center(), img * s), full, 0)
+                }
+            };
+            egui::Image::from_texture((t.id(), img)).uv(uv).corner_radius(radius).paint_at(ui, r);
+        }
+
+        let painter = ui.painter_at(rect);
+        let mode = m.current_mode;
+        chip(&painter, rect.left_top() + vec2(12.0, 12.0), Align2::LEFT_TOP, &format!(
+            "{}  ·  {} × {}  ·  {:.0} Hz",
+            m.friendly_name, mode.width, mode.height, mode.refresh_hz
+        ));
+        let assigned = self.cfg.assignment_for(&m.id).map(|a| a.path.clone());
+        let state = match &self.chosen {
+            Some(c) if Some(&c.probe.path) == assigned.as_ref() => Some("On your desktop now"),
+            Some(_) => Some("Not applied yet"),
+            None if self.backdrop.poster.is_some() => Some("On your desktop now"),
+            None => None,
+        };
+        if let Some(s) = state {
+            chip(&painter, rect.right_top() + vec2(-12.0, 12.0), Align2::RIGHT_TOP, s);
+        }
+
         let c = rect.center();
+        let (light, dim) = (Color32::from_gray(245), Color32::from_gray(200));
         if hovering_file {
-            painter.rect_stroke(rect.shrink(1.0), CornerRadius::same(8), Stroke::new(2.0_f32, p.accent), StrokeKind::Inside);
+            painter.rect_filled(rect, CornerRadius::same(10), Color32::from_black_alpha(140));
+            painter.rect_stroke(rect.shrink(1.0), CornerRadius::same(10), Stroke::new(2.0_f32, p.accent), StrokeKind::Inside);
             painter.text(c, Align2::CENTER_CENTER, "Drop to choose this file", theme::strong(theme::SUBTITLE), light);
         } else if self.probing.is_some() {
-            painter.text(c, Align2::CENTER_CENTER, "Inspecting the file…", theme::font(theme::BODY), dim);
+            pill_text(&painter, c, "Inspecting the file…", theme::font(theme::BODY), light);
             ctx.request_repaint_after(Duration::from_millis(100));
         } else if self.chosen.is_some() {
             let hot = resp.hovered();
-            painter.circle_filled(c - vec2(0.0, 12.0), if hot { 30.0 } else { 28.0 }, p.accent);
-            painter.text(c - vec2(-2.0, 12.0), Align2::CENTER_CENTER, icon::PLAY, theme::icon_font(22.0), p.on_accent);
-            painter.text(c + vec2(0.0, 34.0), Align2::CENTER_CENTER, "Preview on this display's shape", theme::font(theme::BODY), dim);
+            painter.circle_filled(c, if hot { 34.0 } else { 32.0 }, p.accent);
+            painter.text(c + vec2(2.0, 0.0), Align2::CENTER_CENTER, icon::PLAY, theme::icon_font(24.0), p.on_accent);
+            pill_text(&painter, c + vec2(0.0, 58.0), "Play a live preview", theme::font(theme::CAPTION), light);
             if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                 self.start_preview(px);
             }
         } else {
-            painter.text(c - vec2(0.0, 30.0), Align2::CENTER_CENTER, icon::PHOTO, theme::icon_font(30.0), dim);
-            painter.text(c + vec2(0.0, 8.0), Align2::CENTER_CENTER, "Choose an image or video", theme::strong(theme::SUBTITLE), light);
-            painter.text(c + vec2(0.0, 34.0), Align2::CENTER_CENTER, "Click here, or drop a file onto this window", theme::font(theme::BODY), dim);
+            if self.backdrop.poster.is_some() {
+                painter.rect_filled(rect, CornerRadius::same(10), Color32::from_black_alpha(90));
+            }
+            let hot = resp.hovered();
+            let button = egui::Rect::from_center_size(c - vec2(0.0, 10.0), vec2(250.0, 44.0));
+            let fill = if hot { p.accent.gamma_multiply(0.9) } else { p.accent };
+            painter.rect_filled(button, CornerRadius::same(22), fill);
+            painter.text(button.left_center() + vec2(26.0, 0.0), Align2::LEFT_CENTER, icon::OPEN_FILE, theme::icon_font(16.0), p.on_accent);
+            painter.text(button.center() + vec2(12.0, -1.0), Align2::CENTER_CENTER, "Choose an image or video", theme::strong(theme::BODY), p.on_accent);
+            painter.text(c + vec2(0.0, 34.0), Align2::CENTER_CENTER, "or drop a file onto this window", theme::font(theme::CAPTION), dim);
             if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                 self.choose_file();
             }
         }
     }
 
-    fn command_bar(&mut self, ui: &mut Ui, p: &Palette, m: &Monitor) {
-        // A segmented control, not a drop-down: a drop-down list would open
-        // underneath the native preview window and be hidden by it.
-        let mut fit = self.fit;
-        widgets::segmented(ui, p, &mut fit, &[(FitMode::Fill, "Fill"), (FitMode::Fit, "Fit"), (FitMode::Stretch, "Stretch")]);
-        self.fit = fit;
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let has_file = self.chosen.is_some();
-            let name = &m.friendly_name;
-            if widgets::accent_button(ui, p, None, "Apply", has_file)
-                .on_hover_text(format!("Set as the wallpaper on {name}"))
-                .clicked()
-            {
-                self.apply();
-            }
-            let fit_changed = self.preview.is_some() && self.preview_fit_mode != self.fit;
-            if self.preview.is_some() && !fit_changed {
-                if widgets::button(ui, p, Some(icon::STOP), "Stop preview").clicked() {
-                    self.preview = None;
+    /// The control bar under the preview. Segmented controls only: a
+    /// drop-down would open underneath the native preview window.
+    fn dock(&mut self, ui: &mut Ui, p: &Palette) {
+        widgets::glass(ui, p, Margin::symmetric(10, 10), 12, |ui| {
+            ui.horizontal(|ui| {
+                if self.monitors.len() > 1 {
+                    self.monitor_tiles(ui, p);
+                    ui.add_space(4.0);
                 }
-            } else if has_file {
-                let label = if fit_changed { "Update preview" } else { "Preview" };
-                if widgets::button(ui, p, Some(icon::PLAY), label).clicked() {
-                    // The preview area starts it on the next frame, where the
-                    // pixel rectangle is known.
-                    self.preview = None;
-                    self.pending_preview = true;
-                    ui.ctx().request_repaint();
-                }
-            }
-        });
-    }
-
-    fn file_card(&mut self, ui: &mut Ui, p: &Palette, m: &Monitor) {
-        let assigned = self.cfg.assignment_for(&m.id).cloned();
-        let mut browse = false;
-        let mut remove = false;
-        widgets::card(ui, p, |ui| {
-            ui.spacing_mut().item_spacing.y = 6.0;
-            if let Some(c) = &self.chosen {
-                let pr = &c.probe;
-                ui.horizontal(|ui| {
-                    let glyph = if pr.kind.needs_renderer() { icon::VIDEO } else { icon::PHOTO };
-                    ui.label(RichText::new(glyph.to_string()).font(theme::icon_font(16.0)).color(p.text2));
-                    ui.add(egui::Label::new(RichText::new(file_name(&pr.path)).font(theme::strong(theme::BODY))).truncate());
-                });
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
-                    let kind = match pr.kind {
-                        MediaKind::Image => "Image",
-                        MediaKind::Video => "Video",
-                        MediaKind::AnimatedImage => "Animation",
-                    };
-                    for t in [kind.to_string(), format!("{} × {}", pr.width, pr.height), format!("{} {}-bit", pr.codec.to_uppercase(), pr.bit_depth())] {
-                        widgets::badge(ui, &t, p.text2, p.subtle);
+                let mut fit = self.fit;
+                widgets::segmented(ui, p, &mut fit, &[(FitMode::Fill, "Fill"), (FitMode::Fit, "Fit"), (FitMode::Stretch, "Stretch")]);
+                self.fit = fit;
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let has_file = self.chosen.is_some();
+                    if widgets::accent_button(ui, p, Some(icon::CHECK), "Apply", has_file).clicked() {
+                        self.apply();
                     }
-                    if let Some(f) = pr.fps {
-                        widgets::badge(ui, &format!("{f:.0} fps"), p.text2, p.subtle);
-                    }
-                    if pr.kind.needs_renderer() {
-                        match &pr.hwdec {
-                            Some(_) => widgets::badge(ui, "GPU decode", p.text2, p.subtle),
-                            None => widgets::badge(ui, "CPU decode", p.caution, p.caution_bg),
+                    let fit_changed = self.preview.is_some() && self.preview_fit_mode != self.fit;
+                    if self.preview.is_some() && !fit_changed {
+                        if widgets::button(ui, p, Some(icon::STOP), "Stop").clicked() {
+                            self.preview = None;
+                        }
+                    } else if has_file {
+                        let label = if fit_changed { "Update preview" } else { "Preview" };
+                        if widgets::button(ui, p, Some(icon::PLAY), label).clicked() {
+                            // The preview area starts it on the next frame,
+                            // where the pixel rectangle is known.
+                            self.preview = None;
+                            self.pending_preview = true;
+                            ui.ctx().request_repaint();
                         }
                     }
+                    let label = if has_file { "Change file" } else { "Choose file" };
+                    if widgets::button(ui, p, Some(icon::OPEN_FILE), label).clicked() {
+                        self.choose_file();
+                    }
                 });
-                ui.add_space(2.0);
-                browse = widgets::button(ui, p, Some(icon::OPEN_FILE), "Choose another file").clicked();
-            } else {
-                ui.label(RichText::new("No file chosen").font(theme::strong(theme::BODY)));
-                ui.label(
-                    RichText::new("Pick an image or video to see how it looks on this display and what it costs.")
-                        .font(theme::font(theme::CAPTION))
-                        .color(p.text2),
-                );
-                ui.add_space(2.0);
-                browse = widgets::button(ui, p, Some(icon::OPEN_FILE), "Browse…").clicked();
-            }
-            if let Some(a) = &assigned {
-                ui.add_space(6.0);
-                let r = ui.available_rect_before_wrap();
-                ui.painter().hline(r.x_range(), r.top(), Stroke::new(1.0_f32, p.card_stroke));
-                ui.add_space(6.0);
-                ui.label(RichText::new("On this display now").font(theme::font(theme::CAPTION)).color(p.text2));
-                ui.horizontal(|ui| {
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        remove = widgets::icon_button(ui, p, icon::DELETE, 14.0).on_hover_text("Remove from this display").clicked();
-                        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                            ui.add(egui::Label::new(format!("{} · {}", file_name(&a.path), fit_label(a.fit))).truncate());
-                        });
-                    });
-                });
-            }
+            });
         });
-        if browse {
-            self.choose_file();
+    }
+
+    /// The displays drawn to scale in their real arrangement, as Windows'
+    /// Display settings shows them. Click one to choose it.
+    fn monitor_tiles(&mut self, ui: &mut Ui, p: &Palette) {
+        let (x0, y0, x1, y1) = self.monitors.iter().fold((i32::MAX, i32::MAX, i32::MIN, i32::MIN), |a, m| {
+            let b = &m.bounds;
+            (a.0.min(b.x), a.1.min(b.y), a.2.max(b.x + b.width as i32), a.3.max(b.y + b.height as i32))
+        });
+        let (w, h) = ((x1 - x0).max(1) as f32, (y1 - y0).max(1) as f32);
+        let scale = (30.0 / h).min(140.0 / w);
+        let (area, _) = ui.allocate_exact_size(vec2(w * scale, h * scale), Sense::hover());
+        let mut clicked = None;
+        for (i, mon) in self.monitors.iter().enumerate() {
+            let b = &mon.bounds;
+            let r = egui::Rect::from_min_size(
+                area.min + vec2((b.x - x0) as f32 * scale, (b.y - y0) as f32 * scale),
+                vec2(b.width as f32 * scale, b.height as f32 * scale),
+            )
+            .shrink(1.5);
+            let resp = ui.interact(r, ui.id().with(("tile", i)), Sense::click());
+            let sel = i == self.selected;
+            let fill = if sel { p.accent.gamma_multiply(0.35) } else if resp.hovered() { p.subtle_hover } else { p.subtle };
+            let stroke = if sel { Stroke::new(2.0_f32, p.accent) } else { Stroke::new(1.0_f32, p.control_stroke) };
+            ui.painter().rect(r, CornerRadius::same(3), fill, stroke, StrokeKind::Inside);
+            ui.painter().text(r.center(), Align2::CENTER_CENTER, (i + 1).to_string(), theme::strong(13.0), p.text);
+            if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                clicked = Some(i);
+            }
         }
-        if remove {
-            self.remove();
+        if let Some(i) = clicked {
+            self.select_monitor(i);
         }
     }
 
-    fn cost_card(&mut self, ui: &mut Ui, p: &Palette) {
+    /// One line under the dock: the file, its cost and its fit, with the
+    /// details one click away.
+    fn summary(&mut self, ui: &mut Ui, p: &Palette, m: &Monitor) {
+        let caption = |t: String, c: Color32| RichText::new(t).font(theme::font(theme::CAPTION)).color(c);
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if self.chosen.is_some() {
+                let (glyph, text) = if self.details { (icon::CHEVRON_UP, "Hide details") } else { (icon::CHEVRON_DOWN, "Details") };
+                if widgets::text_button(ui, p, glyph, text).clicked() {
+                    self.details = !self.details;
+                }
+            }
+            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                let Some(c) = &self.chosen else {
+                    let now = self.cfg.assignment_for(&m.id).cloned();
+                    match now {
+                        Some(a) => {
+                            ui.label(caption(format!("On {} now:", m.friendly_name), p.text2));
+                            ui.add(egui::Label::new(caption(format!("{} · {}", file_name(&a.path), fit_label(a.fit)), p.text)).truncate());
+                            if widgets::icon_button(ui, p, icon::DELETE, 12.0).on_hover_text("Remove from this display").clicked() {
+                                self.remove();
+                            }
+                        }
+                        None => {
+                            ui.label(caption(format!("{} shows the Windows wallpaper.", m.friendly_name), p.text2));
+                        }
+                    }
+                    return;
+                };
+                let pr = &c.probe;
+                let glyph = if pr.kind.needs_renderer() { icon::VIDEO } else { icon::PHOTO };
+                ui.label(RichText::new(glyph.to_string()).font(theme::icon_font(14.0)).color(p.text2));
+                ui.allocate_ui(vec2(220.0, SUMMARY_H), |ui| {
+                    ui.add(egui::Label::new(RichText::new(file_name(&pr.path)).font(theme::strong(theme::BODY))).truncate());
+                });
+                let (cpu, ram, measured) = self.cost();
+                let cost = if !pr.kind.needs_renderer() {
+                    "No background cost".to_string()
+                } else if measured {
+                    format!("{cpu:.1}% CPU · {ram:.0} MB measured")
+                } else {
+                    format!("~{cpu:.1}% CPU · ~{ram:.0} MB")
+                };
+                ui.label(caption("·".into(), p.text3));
+                ui.label(caption(cost, p.text));
+                ui.label(caption("·".into(), p.text3));
+                let issues = c.report.findings.iter().filter(|f| matches!(f.severity, Severity::Problem | Severity::Warning)).count();
+                if issues == 0 {
+                    ui.label(RichText::new(icon::CHECK.to_string()).font(theme::icon_font(12.0)).color(p.success));
+                    ui.label(caption("Fits this display".into(), p.text));
+                } else {
+                    ui.label(RichText::new(icon::WARNING.to_string()).font(theme::icon_font(12.0)).color(p.caution));
+                    let s = if issues == 1 { "" } else { "s" };
+                    ui.label(caption(format!("{issues} thing{s} to review"), p.caution));
+                }
+                ui.label(caption("·".into(), p.text3));
+                let mut spec = format!("{} × {} · {} {}-bit", pr.width, pr.height, pr.codec.to_uppercase(), pr.bit_depth());
+                if let Some(f) = pr.fps {
+                    spec.push_str(&format!(" · {f:.0} fps"));
+                }
+                ui.add(egui::Label::new(caption(spec, p.text2)).truncate());
+            });
+        });
+    }
+
+    /// (CPU %, MB, measured?) for the chosen file: measured during a
+    /// preview, estimated before one.
+    fn cost(&self) -> (f64, f64, bool) {
+        let Some(c) = &self.chosen else { return (0.0, 0.0, false) };
+        if !c.probe.kind.needs_renderer() {
+            return (0.0, 0.0, false);
+        }
+        match self.preview.as_ref().and_then(|pv| pv.measured) {
+            Some(mm) => (mm.cpu_percent, mm.private_mb, true),
+            None => (f64::from(c.report.estimate.cpu_percent_of_one_core), f64::from(c.report.estimate.ram_mb), false),
+        }
+    }
+
+    fn details_panel(&mut self, ui: &mut Ui, p: &Palette, m: &Monitor) {
         let Some(c) = &self.chosen else { return };
-        let est = c.report.estimate;
-        let is_video = c.probe.kind.needs_renderer();
-        let measured = self.preview.as_ref().and_then(|pv| pv.measured);
-        let measuring = self.preview.is_some() && measured.is_none();
-        let policy = self.cfg.policy;
-        widgets::card(ui, p, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Cost while visible").font(theme::strong(theme::BODY)));
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        let mut remove = false;
+        let inner_h = DETAILS_H - 28.0;
+        widgets::glass(ui, p, Margin::symmetric(18, 14), 12, |ui| {
+            ui.set_height(inner_h);
+            ui.columns(2, |cols| {
+                // Left: cost and what happens when hidden.
+                let ui = &mut cols[0];
+                let is_video = c.probe.kind.needs_renderer();
+                let measured = self.preview.as_ref().and_then(|pv| pv.measured);
+                let measuring = self.preview.is_some() && measured.is_none();
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Cost while visible").font(theme::strong(theme::BODY)));
                     if !is_video {
                         widgets::badge(ui, "None", p.success, p.success_bg);
                     } else if measured.is_some() {
@@ -618,87 +766,125 @@ impl App {
                     } else {
                         widgets::badge(ui, "Estimate", p.text2, p.subtle);
                     }
-                });
-            });
-            ui.add_space(8.0);
-            let (cpu, ram) = match (is_video, measured) {
-                (false, _) => (0.0, 0.0),
-                (true, Some(mm)) => (mm.cpu_percent, mm.private_mb),
-                (true, None) => (f64::from(est.cpu_percent_of_one_core), f64::from(est.ram_mb)),
-            };
-            let approx = if is_video && measured.is_none() { "~" } else { "" };
-            ui.columns(2, |cols| {
-                stat(&mut cols[0], p, &format!("{approx}{cpu:.1}%"), "of one CPU core");
-                stat(&mut cols[1], p, &format!("{approx}{ram:.0} MB"), "memory");
-            });
-            ui.add_space(6.0);
-            let note = if !is_video {
-                "A still image is handed to Windows. Nothing runs in the background.".to_string()
-            } else if policy.pause_when_occluded {
-                format!(
-                    "When windows cover the desktop: paused, 0% CPU. After {} s covered: closed, 0 MB.",
-                    policy.occluded_grace_ms / 1000
-                )
-            } else {
-                "Keeps playing when windows cover the desktop. Change this under Performance.".to_string()
-            };
-            ui.label(RichText::new(note).font(theme::font(theme::CAPTION)).color(p.text2));
-            if let Some(mm) = measured {
-                ui.label(
-                    RichText::new(format!(
-                        "Measured over {:.0} s while previewing. The estimate was ~{:.1}% and ~{:.0} MB.",
-                        mm.over_secs, est.cpu_percent_of_one_core, est.ram_mb
-                    ))
-                    .font(theme::font(theme::CAPTION))
-                    .color(p.text3),
-                );
-            } else if is_video && !measuring {
-                ui.label(RichText::new("Preview to measure the real cost.").font(theme::font(theme::CAPTION)).color(p.text3));
-            }
-        });
-    }
-
-    fn fit_card(&mut self, ui: &mut Ui, p: &Palette, m: &Monitor) {
-        let Some(c) = &self.chosen else { return };
-        widgets::card(ui, p, |ui| {
-            ui.label(RichText::new("Fit for this display").font(theme::strong(theme::BODY)));
-            ui.add_space(6.0);
-            if c.report.findings.is_empty() {
-                ui.horizontal(|ui| {
-                    widgets::status_icon(ui, icon::CHECK, p.success, p);
-                    ui.label(format!("Looks right on {}.", m.friendly_name));
-                });
-            }
-            for (i, f) in c.report.findings.iter().enumerate() {
-                if i > 0 {
-                    ui.add_space(10.0);
-                }
-                let (glyph, color) = match f.severity {
-                    Severity::Problem => (icon::ERROR, p.critical),
-                    Severity::Warning => (icon::WARNING, p.caution),
-                    Severity::Advice => (icon::INFO, p.accent),
-                    Severity::Info => (icon::INFO, p.text3),
-                };
-                ui.horizontal_top(|ui| {
-                    widgets::status_icon(ui, glyph, color, p);
-                    ui.vertical(|ui| {
-                        ui.spacing_mut().item_spacing.y = 3.0;
-                        ui.label(RichText::new(&f.title).font(theme::strong(theme::BODY)));
-                        ui.label(RichText::new(&f.detail).font(theme::font(theme::CAPTION)).color(p.text2));
-                        if let Some(hint) = &f.hint {
-                            hint_box(ui, p, hint);
+                    if is_video {
+                        match &c.probe.hwdec {
+                            Some(_) => widgets::badge(ui, "GPU decode", p.text2, p.subtle),
+                            None => widgets::badge(ui, "CPU decode", p.caution, p.caution_bg),
                         }
-                    });
+                    }
                 });
-            }
+                ui.add_space(6.0);
+                let (cpu, ram, _) = self.cost();
+                let approx = if is_video && measured.is_none() { "~" } else { "" };
+                ui.horizontal(|ui| {
+                    stat(ui, p, &format!("{approx}{cpu:.1}%"), "of one CPU core");
+                    ui.add_space(28.0);
+                    stat(ui, p, &format!("{approx}{ram:.0} MB"), "memory");
+                });
+                ui.add_space(6.0);
+                let policy = self.cfg.policy;
+                let note = if !is_video {
+                    "A still image is handed to Windows. Nothing runs in the background.".to_string()
+                } else if policy.pause_when_occluded {
+                    format!(
+                        "When windows cover the desktop: paused, 0% CPU. After {} s covered: closed, 0 MB.",
+                        policy.occluded_grace_ms / 1000
+                    )
+                } else {
+                    "Keeps playing when windows cover the desktop. Change this under Performance.".to_string()
+                };
+                ui.label(RichText::new(note).font(theme::font(theme::CAPTION)).color(p.text2));
+                let est = c.report.estimate;
+                if let Some(mm) = measured {
+                    ui.label(
+                        RichText::new(format!(
+                            "Measured over {:.0} s of preview. The estimate was ~{:.1}% and ~{:.0} MB.",
+                            mm.over_secs, est.cpu_percent_of_one_core, est.ram_mb
+                        ))
+                        .font(theme::font(theme::CAPTION))
+                        .color(p.text3),
+                    );
+                } else if is_video && !measuring {
+                    ui.label(RichText::new("Play a preview to measure the real cost.").font(theme::font(theme::CAPTION)).color(p.text3));
+                }
+                if let Some(a) = self.cfg.assignment_for(&m.id) {
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("Now on this display").font(theme::font(theme::CAPTION)).color(p.text2));
+                    // Right to left so a long name truncates instead of
+                    // widening the panel.
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        remove = widgets::icon_button(ui, p, icon::DELETE, 12.0).on_hover_text("Remove from this display").clicked();
+                        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                            let now = format!("{} · {}", file_name(&a.path), fit_label(a.fit));
+                            ui.add(egui::Label::new(RichText::new(now).font(theme::font(theme::CAPTION))).truncate());
+                        });
+                    });
+                }
+
+                // Right: the fit check.
+                let ui = &mut cols[1];
+                ui.label(RichText::new("Fit for this display").font(theme::strong(theme::BODY)));
+                ui.add_space(4.0);
+                egui::ScrollArea::vertical().id_salt("fit").max_height(inner_h - 28.0).auto_shrink([false, true]).show(ui, |ui| {
+                    if c.report.findings.is_empty() {
+                        ui.horizontal(|ui| {
+                            widgets::status_icon(ui, icon::CHECK, p.success);
+                            ui.label(format!("Looks right on {}.", m.friendly_name));
+                        });
+                    }
+                    for (i, f) in c.report.findings.iter().enumerate() {
+                        if i > 0 {
+                            ui.add_space(10.0);
+                        }
+                        let (glyph, color) = match f.severity {
+                            Severity::Problem => (icon::ERROR, p.critical),
+                            Severity::Warning => (icon::WARNING, p.caution),
+                            Severity::Advice => (icon::INFO, p.accent),
+                            Severity::Info => (icon::INFO, p.text3),
+                        };
+                        ui.horizontal_top(|ui| {
+                            widgets::status_icon(ui, glyph, color);
+                            ui.vertical(|ui| {
+                                ui.spacing_mut().item_spacing.y = 3.0;
+                                ui.label(RichText::new(&f.title).font(theme::strong(theme::BODY)));
+                                ui.label(RichText::new(&f.detail).font(theme::font(theme::CAPTION)).color(p.text2));
+                                if let Some(hint) = &f.hint {
+                                    hint_box(ui, p, hint);
+                                }
+                            });
+                        });
+                    }
+                });
+            });
         });
+        if remove {
+            self.remove();
+        }
     }
 }
 
+/// A small dark label over the picture.
+fn chip(painter: &egui::Painter, pos: egui::Pos2, align: Align2, text: &str) {
+    let galley = painter.layout_no_wrap(text.to_string(), theme::font(theme::CAPTION), Color32::from_gray(240));
+    let rect = align.anchor_size(pos, galley.size() + vec2(20.0, 10.0));
+    painter.rect_filled(rect, CornerRadius::same(12), Color32::from_black_alpha(150));
+    painter.galley(rect.center() - galley.size() / 2.0, galley, Color32::from_gray(240));
+}
+
+/// Centred text on a dark pill, legible over any picture.
+fn pill_text(painter: &egui::Painter, center: egui::Pos2, text: &str, font: egui::FontId, color: Color32) {
+    let galley = painter.layout_no_wrap(text.to_string(), font, color);
+    let rect = egui::Rect::from_center_size(center, galley.size() + vec2(24.0, 12.0));
+    painter.rect_filled(rect, CornerRadius::same(14), Color32::from_black_alpha(150));
+    painter.galley(rect.center() - galley.size() / 2.0, galley, color);
+}
+
 fn stat(ui: &mut Ui, p: &Palette, value: &str, label: &str) {
-    ui.spacing_mut().item_spacing.y = 0.0;
-    ui.label(RichText::new(value).font(theme::strong(theme::SUBTITLE)));
-    ui.label(RichText::new(label).font(theme::font(theme::CAPTION)).color(p.text2));
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        ui.label(RichText::new(value).font(theme::strong(theme::TITLE)));
+        ui.label(RichText::new(label).font(theme::font(theme::CAPTION)).color(p.text2));
+    });
 }
 
 /// A fix suggestion. Commands get a monospace box with a copy button.
@@ -712,7 +898,7 @@ fn hint_box(ui: &mut Ui, p: &Palette, hint: &str) {
         ui.label(RichText::new(lead.trim()).font(theme::font(theme::CAPTION)).color(p.text2));
     }
     Frame::new()
-        .fill(p.subtle)
+        .fill(Color32::from_black_alpha(90))
         .corner_radius(CornerRadius::same(4))
         .inner_margin(Margin::symmetric(8, 6))
         .show(ui, |ui| {
@@ -882,16 +1068,13 @@ impl App {
             widgets::row(
                 ui,
                 p,
-                icon::LEAF,
+                icon::MEMORY,
                 "Free memory after",
                 "Closes the video player once the desktop has been covered this long. It resumes from the same frame.",
                 true,
                 |ui| {
                     let mut secs = (policy.occluded_grace_ms / 1000) as u32;
-                    let r = ui.add_enabled(
-                        policy.pause_when_occluded,
-                        egui::Slider::new(&mut secs, 5..=600).suffix(" s").logarithmic(true),
-                    );
+                    let r = slider_cell(ui, policy.pause_when_occluded, egui::Slider::new(&mut secs, 5..=600).suffix(" s").logarithmic(true));
                     policy.occluded_grace_ms = u64::from(secs) * 1000;
                     commit_policy |= settled(&r);
                 },
@@ -899,11 +1082,8 @@ impl App {
             widgets::row(ui, p, icon::BATTERY, "Never play on battery", "Shows a still frame instead whenever the charger is unplugged.", true, |ui| {
                 commit_policy |= widgets::toggle(ui, p, &mut policy.suspend_on_battery_always).changed();
             });
-            widgets::row(ui, p, icon::BATTERY, "Stop playing below", "Battery level at which video stops when unplugged.", true, |ui| {
-                let r = ui.add_enabled(
-                    !policy.suspend_on_battery_always,
-                    egui::Slider::new(&mut policy.battery_threshold_pct, 0..=100).suffix("%"),
-                );
+            widgets::row(ui, p, icon::BATTERY_LOW, "Stop playing below", "Battery level at which video stops when unplugged.", true, |ui| {
+                let r = slider_cell(ui, !policy.suspend_on_battery_always, egui::Slider::new(&mut policy.battery_threshold_pct, 0..=100).suffix("%"));
                 commit_policy |= settled(&r);
             });
         });
@@ -946,6 +1126,13 @@ impl App {
             self.commit("Saving", false, |c| c.start_with_windows = autostart);
         }
     }
+}
+
+/// A slider inside a right-to-left settings row, laid out left to right so
+/// its value box stays after the rail.
+fn slider_cell(ui: &mut Ui, enabled: bool, slider: egui::Slider) -> egui::Response {
+    let w = ui.spacing().slider_width + 72.0;
+    ui.allocate_ui_with_layout(vec2(w, 24.0), Layout::left_to_right(Align::Center), |ui| ui.add_enabled(enabled, slider)).inner
 }
 
 /// A slider edit is final when the drag ends, or on a click or key press.
