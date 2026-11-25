@@ -64,7 +64,7 @@ cargo test --workspace
 
 ```powershell
 winget install JRSoftware.InnoSetup   # once
-.	oolsuild-installer.ps1          # -> dist\wallSet-Setup-<version>.exe
+.\tools\build-installer.ps1          # -> dist\wallSet-Setup-<version>.exe
 ```
 
 The installer is per-user (no administrator rights) and installs to
