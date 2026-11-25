@@ -1,0 +1,30 @@
+wallSet third-party notices
+===========================
+
+libmpv-2.dll
+------------
+wallSet plays video through libmpv, the library form of the mpv media player
+(https://mpv.io), loaded at run time from libmpv-2.dll in this folder.
+
+This copy is an unmodified build from the mpv-winbuild-cmake project:
+
+  Release: https://github.com/shinchiro/mpv-winbuild-cmake/releases/tag/20261111
+  Asset:   mpv-dev-x86_64-20261111-git-bcde6b93cc.7z
+  SHA256:  273c079b11ea5575822f972756f4c9a71149a5c10130353abeb8586738938452
+
+mpv is licensed GPLv2-or-later, or LGPLv2.1-or-later when built without its
+GPL-only parts. This build is treated as GPL-licensed. The full text of the
+GNU General Public License, version 2, is in GPL-2.0.txt in this folder.
+
+The DLL also contains libraries statically linked by that build (FFmpeg and
+others), each under its own licence. The source code for the build, and the
+recipe that produced it, are available from:
+
+  mpv source:        https://github.com/mpv-player/mpv (commit bcde6b93cc)
+  build recipe:      https://github.com/shinchiro/mpv-winbuild-cmake
+  FFmpeg and others: listed in the build recipe above
+
+Segoe UI and Segoe Fluent Icons
+-------------------------------
+wallSet's settings window uses these fonts from your Windows installation.
+They are not included in wallSet.

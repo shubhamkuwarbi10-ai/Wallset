@@ -60,6 +60,19 @@ cargo test --workspace
 .\tools\stage.ps1          # -> dist\wallSet\ with libmpv alongside
 ```
 
+### Installer
+
+```powershell
+winget install JRSoftware.InnoSetup   # once
+.	oolsuild-installer.ps1          # -> dist\wallSet-Setup-<version>.exe
+```
+
+The installer is per-user (no administrator rights) and installs to
+`%LOCALAPPDATA%\Programs\wallSet` with a Start menu entry. Uninstalling
+stops the service, removes autostart, and asks whether to keep settings.
+It is not code-signed, so Windows SmartScreen warns on first run
+("More info", then "Run anyway").
+
 libmpv is not committed. Put `libmpv-2.dll` in `vendor\mpv\` (the version
 used for the benchmarks is recorded in `vendor\mpv\SOURCE.txt`), or point
 `WALLSET_LIBMPV` at it during development.
@@ -94,6 +107,8 @@ crates/
 tools/
   bench.py          Process benchmark (private bytes, working set, precise CPU, GPU engines). Stdlib only.
   stage.ps1         Assemble a runnable folder.
+  build-installer.ps1  Stage, then build the Setup.exe from installer/wallSet.iss.
+installer/          Inno Setup script, icon, third-party notices.
 docs/
   ARCHITECTURE.md   Design, per-OS feasibility, policy tiers, risks.
   BENCHMARKS.md     All measurements, method, caveats, open questions.
@@ -115,4 +130,6 @@ docs/
 ## Licence
 
 wallSet: MPL-2.0. libmpv is GPLv2+ / LGPLv2.1+ depending on build
-configuration; check the licence of the build you ship.
+configuration; check the licence of the build you ship. The installer treats
+the bundled build as GPL and ships `installer/THIRD-PARTY-NOTICES.txt` and the
+GPLv2 text with it.
