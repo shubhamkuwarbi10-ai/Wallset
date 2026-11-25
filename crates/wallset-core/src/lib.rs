@@ -14,7 +14,7 @@ pub mod media;
 pub mod monitor;
 pub mod policy;
 
-pub use config::{Assignment, Config, FitMode, RenderSettings};
+pub use config::{Assignment, Config, FitMode, Recent, RenderSettings};
 pub use fitness::{Finding, FitnessReport, Severity, analyse};
 pub use media::{ColorTransfer, MediaKind, MediaProbe};
 pub use monitor::{

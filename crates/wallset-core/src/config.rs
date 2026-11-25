@@ -47,6 +47,25 @@ pub struct Assignment {
     pub fit: FitMode,
 }
 
+/// A wallpaper that was applied before. Kept so it can be found and reused
+/// later, even after the file has moved or been deleted.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Recent {
+    pub path: PathBuf,
+    pub kind: MediaKind,
+    #[serde(default)]
+    pub fit: FitMode,
+    /// The web link it was downloaded from, if it came from one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// When it was last applied, in seconds since the Unix epoch.
+    #[serde(default)]
+    pub last_used: u64,
+}
+
+/// How many past wallpapers are remembered.
+pub const RECENT_MAX: usize = 30;
+
 /// Rendering choices that trade quality for cost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -99,6 +118,8 @@ pub struct Config {
     pub render: RenderSettings,
     /// Start the daemon when the user signs in.
     pub start_with_windows: bool,
+    /// Wallpapers applied before, newest first.
+    pub recent: Vec<Recent>,
 }
 
 impl Config {
@@ -117,9 +138,25 @@ impl Config {
         self.assignments.retain(|x| &x.monitor != monitor);
     }
 
+    /// Put a wallpaper at the top of the history, replacing an older entry
+    /// for the same file. A web link already known for the file is kept.
+    pub fn remember(&mut self, mut r: Recent) {
+        if let Some(old) = self.recent.iter().position(|x| x.path == r.path) {
+            let old = self.recent.remove(old);
+            r.url = r.url.or(old.url);
+        }
+        self.recent.insert(0, r);
+        self.recent.truncate(RECENT_MAX);
+    }
+
+    pub fn forget(&mut self, path: &Path) {
+        self.recent.retain(|x| x.path != path);
+    }
+
     /// Clamp everything into a valid range after loading from disk.
     pub fn sanitise(&mut self) {
         self.policy.sanitise();
+        self.recent.truncate(RECENT_MAX);
     }
 
     /// Load and sanitise. A missing file gives defaults. A corrupt one also
@@ -184,6 +221,39 @@ mod tests {
             kind: MediaKind::Video,
             fit: FitMode::Fill,
         }
+    }
+
+    fn r(path: &str, url: Option<&str>) -> Recent {
+        Recent { path: path.into(), kind: MediaKind::Video, fit: FitMode::Fill, url: url.map(Into::into), last_used: 1 }
+    }
+
+    #[test]
+    fn remember_puts_newest_first_without_duplicates_and_keeps_the_link() {
+        let mut c = Config::default();
+        c.remember(r("a.mp4", Some("https://x/a.mp4")));
+        c.remember(r("b.mp4", None));
+        c.remember(r("a.mp4", None));
+        let paths: Vec<_> = c.recent.iter().map(|x| x.path.to_string_lossy().into_owned()).collect();
+        assert_eq!(paths, ["a.mp4", "b.mp4"]);
+        assert_eq!(c.recent[0].url.as_deref(), Some("https://x/a.mp4"));
+        c.forget(Path::new("a.mp4"));
+        assert_eq!(c.recent.len(), 1);
+    }
+
+    #[test]
+    fn history_is_capped() {
+        let mut c = Config::default();
+        for i in 0..RECENT_MAX + 5 {
+            c.remember(r(&format!("{i}.mp4"), None));
+        }
+        assert_eq!(c.recent.len(), RECENT_MAX);
+        assert_eq!(c.recent[0].path, PathBuf::from(format!("{}.mp4", RECENT_MAX + 4)));
+    }
+
+    #[test]
+    fn config_without_history_still_loads() {
+        let c: Config = serde_json::from_str(r#"{"assignments": []}"#).unwrap();
+        assert!(c.recent.is_empty());
     }
 
     #[test]

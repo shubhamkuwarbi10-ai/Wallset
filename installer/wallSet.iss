@@ -110,7 +110,7 @@ end;
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if (CurUninstallStep = usPostUninstall) and not UninstallSilent() then
-    if MsgBox('Also remove your wallSet settings and logs?' + #13#10 +
+    if MsgBox('Also remove your wallSet settings, logs and downloaded wallpapers?' + #13#10 +
               'Choose No to keep them for a later reinstall.',
               mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
     begin

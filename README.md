@@ -87,6 +87,10 @@ dist\wallSet\wallset.exe check clip.mp4        # will it look right? what will i
 dist\wallSet\wallset.exe caps                  # what this session supports
 ```
 
+Wallpapers can come from a file or a web link ("From link"): a link is
+downloaded once to `%LOCALAPPDATA%\wallSet\downloads`. The History tab lists
+wallpapers applied before and marks files that have been moved or deleted.
+
 The settings window starts the background service on first apply. The
 service lives in the notification area: settings, "Pause video
 wallpapers", quit. It logs every decision with its reason to

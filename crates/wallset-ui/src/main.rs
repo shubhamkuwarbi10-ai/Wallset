@@ -8,6 +8,7 @@
 #![cfg_attr(not(test), windows_subsystem = "windows")]
 
 mod backdrop;
+mod download;
 mod preview;
 mod service;
 mod theme;
@@ -17,13 +18,14 @@ use eframe::egui::{
     self, Align, Align2, Color32, CornerRadius, Frame, Layout, Margin, RichText, Sense, Stroke, StrokeKind, Ui, vec2,
 };
 use preview::Preview;
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 use theme::{Palette, icon};
 use wallset_core::fitness::{self, FitnessReport, Severity};
 use wallset_core::media::MediaProbe;
-use wallset_core::{Assignment, Config, FitMode, Monitor};
+use wallset_core::{Assignment, Config, FitMode, Monitor, Recent};
 use widgets::Tone;
 
 const MEDIA_EXTENSIONS: &[&str] = &[
@@ -54,6 +56,7 @@ fn main() -> eframe::Result {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
     Wallpaper,
+    History,
     Display,
     Performance,
 }
@@ -74,11 +77,62 @@ struct Backdrop {
     accent: Option<Color32>,
 }
 
+/// History thumbnails, loaded one at a time on a worker thread from the
+/// Windows thumbnail cache. `None` once tried: no thumbnail exists.
+#[derive(Default)]
+struct Thumbs {
+    tex: HashMap<PathBuf, Option<egui::TextureHandle>>,
+    /// Paths to the worker, pictures back.
+    queue: Option<(mpsc::Sender<PathBuf>, mpsc::Receiver<ThumbResult>)>,
+}
+
+type ThumbResult = (PathBuf, Option<egui::ColorImage>);
+
+impl Thumbs {
+    fn get(&mut self, ctx: &egui::Context, path: &Path) -> Option<&egui::TextureHandle> {
+        if !self.tex.contains_key(path) {
+            let (tx, _) = self.queue.get_or_insert_with(|| {
+                let (req_tx, req_rx) = mpsc::channel::<PathBuf>();
+                let (res_tx, res_rx) = mpsc::channel();
+                let ctx = ctx.clone();
+                std::thread::spawn(move || {
+                    for path in req_rx {
+                        let img = backdrop::thumbnail(&path, 320);
+                        if res_tx.send((path, img)).is_err() {
+                            break;
+                        }
+                        ctx.request_repaint();
+                    }
+                });
+                (req_tx, res_rx)
+            });
+            let _ = tx.send(path.to_path_buf());
+            self.tex.insert(path.to_path_buf(), None);
+        }
+        if let Some((_, rx)) = &self.queue {
+            while let Ok((path, img)) = rx.try_recv() {
+                let t = img.map(|i| ctx.load_texture(format!("thumb {}", path.display()), i, egui::TextureOptions::LINEAR));
+                self.tex.insert(path, t);
+            }
+        }
+        self.tex.get(path).and_then(Option::as_ref)
+    }
+}
+
 struct App {
     page: Page,
     backdrop: Backdrop,
     /// The cost and fit panel under the preview is open.
     details: bool,
+    /// The web-link row is open, with what has been typed so far.
+    link: Option<String>,
+    focus_link: bool,
+    download: Option<download::Download>,
+    /// Web links that downloaded files came from, for the history.
+    sources: HashMap<PathBuf, String>,
+    thumbs: Thumbs,
+    /// The history entry whose properties are showing.
+    info_open: Option<PathBuf>,
     monitors: Vec<Monitor>,
     selected: usize,
     cfg: Config,
@@ -111,6 +165,12 @@ impl App {
             page: Page::Wallpaper,
             backdrop: Backdrop::default(),
             details: false,
+            link: None,
+            focus_link: false,
+            download: None,
+            sources: HashMap::new(),
+            thumbs: Thumbs::default(),
+            info_open: None,
             monitors,
             selected: 0,
             cfg,
@@ -228,15 +288,54 @@ impl App {
     fn apply(&mut self) {
         let (Some(m), Some(c)) = (self.monitor(), &self.chosen) else { return };
         let a = Assignment { monitor: m.id.clone(), path: c.probe.path.clone(), kind: c.probe.kind, fit: self.fit };
+        let r = Recent {
+            path: a.path.clone(),
+            kind: a.kind,
+            fit: a.fit,
+            url: self.sources.get(&a.path).cloned(),
+            last_used: now_secs(),
+        };
         let name = m.friendly_name.clone();
         self.preview = None;
-        self.commit(&format!("Applied to {name}."), true, |c| c.assign(a));
+        self.commit(&format!("Applied to {name}."), true, |c| {
+            c.assign(a);
+            c.remember(r);
+        });
     }
 
     fn remove(&mut self) {
         let Some(m) = self.monitor() else { return };
         let (id, name) = (m.id.clone(), m.friendly_name.clone());
         self.commit(&format!("Removed from {name}."), true, |c| c.unassign(&id));
+    }
+
+    fn start_download(&mut self, url: &str) {
+        match download::Download::start(url) {
+            Ok(d) => {
+                self.download = Some(d);
+                self.link = None;
+            }
+            Err(e) => self.status = Some((Tone::Critical, e)),
+        }
+    }
+
+    /// A finished download is inspected like a chosen file.
+    fn poll_download(&mut self, ctx: &egui::Context) {
+        let Some(d) = &mut self.download else { return };
+        let Some(result) = d.poll() else {
+            ctx.request_repaint_after(Duration::from_millis(250));
+            return;
+        };
+        let url = d.url.clone();
+        self.download = None;
+        match result {
+            Ok(path) => {
+                self.sources.insert(path.clone(), url);
+                self.page = Page::Wallpaper;
+                self.inspect(path);
+            }
+            Err(e) => self.status = Some((Tone::Critical, e)),
+        }
     }
 
     fn start_preview(&mut self, px: (i32, i32, u32, u32)) {
@@ -333,6 +432,7 @@ impl eframe::App for App {
             self.hwnd = native_hwnd(frame);
         }
         self.poll_probe();
+        self.poll_download(ctx);
         if self.probing.is_some() {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
@@ -360,6 +460,7 @@ impl eframe::App for App {
             .frame(Frame::new().inner_margin(Margin { left: 24, right: 24, top: 10, bottom: 18 }))
             .show(ctx, |ui| match self.page {
                 Page::Wallpaper => self.wallpaper_page(ui, ctx, &p),
+                Page::History => scroll_page(ui, |ui| self.history_page(ui, &p)),
                 Page::Display => scroll_page(ui, |ui| self.display_page(ui, &p)),
                 Page::Performance => scroll_page(ui, |ui| self.performance_page(ui, &p)),
             });
@@ -409,7 +510,12 @@ impl App {
                 ui,
                 p,
                 &mut page,
-                &[(Page::Wallpaper, "Wallpaper"), (Page::Display, "Display"), (Page::Performance, "Performance")],
+                &[
+                    (Page::Wallpaper, "Wallpaper"),
+                    (Page::History, "History"),
+                    (Page::Display, "Display"),
+                    (Page::Performance, "Performance"),
+                ],
             )
         });
         if page != self.page {
@@ -440,7 +546,7 @@ impl App {
 // --- Wallpaper page -------------------------------------------------------
 
 const DOCK_H: f32 = 52.0;
-const SUMMARY_H: f32 = 24.0;
+const SUMMARY_H: f32 = 32.0;
 const DETAILS_H: f32 = 236.0;
 
 impl App {
@@ -467,7 +573,7 @@ impl App {
         }
         // The bars need room for their controls even when the preview is
         // short and narrow.
-        let bar_w = size.x.max(avail.x.min(680.0));
+        let bar_w = size.x.max(avail.x.min(760.0));
         let indent = |ui: &mut Ui, width: f32| ui.add_space(((avail.x - width) / 2.0).max(0.0));
 
         ui.horizontal(|ui| {
@@ -484,7 +590,11 @@ impl App {
             indent(ui, bar_w);
             ui.allocate_ui_with_layout(vec2(bar_w, SUMMARY_H), Layout::left_to_right(Align::Center), |ui| {
                 ui.set_width(bar_w);
-                self.summary(ui, p, &m);
+                if self.link.is_some() || self.download.is_some() {
+                    self.link_row(ui, p);
+                } else {
+                    self.summary(ui, p, &m);
+                }
             });
         });
         if open {
@@ -623,6 +733,10 @@ impl App {
                             ui.ctx().request_repaint();
                         }
                     }
+                    if widgets::button(ui, p, Some(icon::LINK), "From link").clicked() && self.download.is_none() {
+                        self.link = if self.link.is_some() { None } else { Some(String::new()) };
+                        self.focus_link = self.link.is_some();
+                    }
                     let label = if has_file { "Change file" } else { "Choose file" };
                     if widgets::button(ui, p, Some(icon::OPEN_FILE), label).clicked() {
                         self.choose_file();
@@ -662,6 +776,52 @@ impl App {
         }
         if let Some(i) = clicked {
             self.select_monitor(i);
+        }
+    }
+
+    /// Replaces the summary line while a web link is typed or downloading.
+    fn link_row(&mut self, ui: &mut Ui, p: &Palette) {
+        if let Some(d) = &self.download {
+            let mut cancel = false;
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                cancel = widgets::button(ui, p, None, "Cancel").clicked();
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    ui.add(egui::Spinner::new().size(14.0).color(p.accent));
+                    ui.label(format!("Downloading… {:.1} MB", d.received() as f64 / 1_000_000.0));
+                    ui.add(egui::Label::new(RichText::new(&d.url).font(theme::font(theme::CAPTION)).color(p.text3)).truncate());
+                });
+            });
+            if cancel {
+                // Dropping it stops curl and removes the partial file.
+                self.download = None;
+            }
+            return;
+        }
+        let mut text = self.link.take().unwrap_or_default();
+        let (mut go, mut cancel) = (false, false);
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            cancel = widgets::button(ui, p, None, "Cancel").clicked();
+            go = widgets::accent_button(ui, p, Some(icon::DOWNLOAD), "Download", !text.trim().is_empty()).clicked();
+            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                let r = ui.add(
+                    egui::TextEdit::singleline(&mut text)
+                        .hint_text("Paste a link to an image or video, like https://example.com/clip.mp4")
+                        .desired_width(f32::INFINITY)
+                        .margin(Margin::symmetric(10, 6)),
+                );
+                if std::mem::take(&mut self.focus_link) {
+                    r.request_focus();
+                }
+                go |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && !text.trim().is_empty();
+            });
+        });
+        if cancel {
+            return;
+        }
+        if go {
+            self.start_download(&text);
+        } else {
+            self.link = Some(text);
         }
     }
 
@@ -915,6 +1075,237 @@ fn hint_box(ui: &mut Ui, p: &Palette, hint: &str) {
         });
 }
 
+// --- History page ---------------------------------------------------------
+
+enum HistoryAction {
+    Use(Recent),
+    Redownload(String),
+    ToggleInfo(PathBuf),
+    Reveal(PathBuf),
+    Properties(PathBuf),
+    Forget(PathBuf),
+}
+
+impl App {
+    fn history_page(&mut self, ui: &mut Ui, p: &Palette) {
+        // What is on a display now, then everything applied before.
+        let mut items: Vec<Recent> = Vec::new();
+        for a in &self.cfg.assignments {
+            if !self.cfg.recent.iter().any(|r| r.path == a.path) && !items.iter().any(|r| r.path == a.path) {
+                items.push(Recent { path: a.path.clone(), kind: a.kind, fit: a.fit, url: None, last_used: 0 });
+            }
+        }
+        items.extend(self.cfg.recent.iter().cloned());
+
+        widgets::group_header(ui, "Recent wallpapers");
+        ui.label(
+            RichText::new("Wallpapers you have applied, newest first. Files that were moved or deleted are marked.")
+                .font(theme::font(theme::CAPTION))
+                .color(p.text2),
+        );
+        ui.add_space(10.0);
+        if items.is_empty() {
+            widgets::card(ui, p, |ui| {
+                ui.label(RichText::new("Nothing here yet").font(theme::strong(theme::BODY)));
+                ui.label(RichText::new("Wallpapers you apply will appear here.").color(p.text2));
+            });
+            return;
+        }
+
+        let gap = 12.0;
+        let w = ui.available_width();
+        let cols = ((w + gap) / (250.0 + gap)).floor().max(1.0) as usize;
+        let card_w = (w - gap * (cols - 1) as f32) / cols as f32;
+        let mut action = None;
+        for row in items.chunks(cols) {
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                for r in row {
+                    ui.allocate_ui_with_layout(vec2(card_w, 0.0), Layout::top_down(Align::Min), |ui| {
+                        ui.set_width(card_w);
+                        if let Some(a) = self.history_card(ui, p, r) {
+                            action = Some(a);
+                        }
+                    });
+                }
+            });
+            ui.add_space(gap - ui.spacing().item_spacing.y);
+        }
+
+        match action {
+            Some(HistoryAction::Use(r)) => {
+                self.page = Page::Wallpaper;
+                self.fit = r.fit;
+                if let Some(u) = r.url {
+                    self.sources.insert(r.path.clone(), u);
+                }
+                self.inspect(r.path);
+            }
+            Some(HistoryAction::Redownload(url)) => {
+                self.page = Page::Wallpaper;
+                self.start_download(&url);
+            }
+            Some(HistoryAction::ToggleInfo(path)) => {
+                self.info_open = if self.info_open.as_ref() == Some(&path) { None } else { Some(path) };
+            }
+            Some(HistoryAction::Reveal(path)) => reveal_in_explorer(&path),
+            Some(HistoryAction::Properties(path)) => show_properties(&path),
+            Some(HistoryAction::Forget(path)) => {
+                self.info_open = None;
+                self.commit("Removing from history", false, |c| c.forget(&path));
+            }
+            None => {}
+        }
+    }
+
+    fn history_card(&mut self, ui: &mut Ui, p: &Palette, r: &Recent) -> Option<HistoryAction> {
+        let meta = std::fs::metadata(&r.path).ok().filter(std::fs::Metadata::is_file);
+        let exists = meta.is_some();
+        let current: Vec<&str> = self
+            .cfg
+            .assignments
+            .iter()
+            .filter(|a| a.path == r.path)
+            .filter_map(|a| self.monitors.iter().find(|m| m.id == a.monitor).map(|m| m.friendly_name.as_str()))
+            .collect();
+        let showing_info = self.info_open.as_ref() == Some(&r.path);
+        let mut action = None;
+        let thumb = if exists { self.thumbs.get(ui.ctx(), &r.path).map(|t| (t.id(), t.size_vec2())) } else { None };
+
+        widgets::glass(ui, p, Margin::same(10), 10, |ui| {
+            // Picture, or why there is none. Clicking it uses the wallpaper.
+            let w = ui.available_width();
+            let (rect, resp) = ui.allocate_exact_size(vec2(w, w * 9.0 / 16.0), Sense::click());
+            let painter = ui.painter_at(rect);
+            painter.rect_filled(rect, CornerRadius::same(6), Color32::from_black_alpha(120));
+            match thumb {
+                Some((id, size)) => {
+                    egui::Image::from_texture((id, size))
+                        .uv(backdrop::cover_uv(size, rect.size()))
+                        .corner_radius(6)
+                        .paint_at(ui, rect);
+                }
+                None if exists => {
+                    let glyph = if r.kind.needs_renderer() { icon::VIDEO } else { icon::PHOTO };
+                    painter.text(rect.center(), Align2::CENTER_CENTER, glyph, theme::icon_font(28.0), p.text3);
+                }
+                None => {
+                    painter.text(rect.center() - vec2(0.0, 12.0), Align2::CENTER_CENTER, icon::WARNING, theme::icon_font(24.0), p.critical);
+                    painter.text(rect.center() + vec2(0.0, 16.0), Align2::CENTER_CENTER, "File not found", theme::font(theme::CAPTION), p.text2);
+                }
+            }
+            if exists && resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                action = Some(HistoryAction::Use(r.clone()));
+            }
+            ui.add_space(8.0);
+
+            ui.add(egui::Label::new(RichText::new(file_name(&r.path)).font(theme::strong(theme::BODY))).truncate());
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                if exists {
+                    ui.label(RichText::new(icon::CHECK.to_string()).font(theme::icon_font(11.0)).color(p.success));
+                    let size = meta.as_ref().map_or(0, std::fs::Metadata::len);
+                    ui.label(RichText::new(format!("On this PC · {}", human_size(size))).font(theme::font(theme::CAPTION)).color(p.text2));
+                } else {
+                    ui.label(RichText::new(icon::WARNING.to_string()).font(theme::icon_font(11.0)).color(p.critical));
+                    ui.label(RichText::new("Missing: moved or deleted").font(theme::font(theme::CAPTION)).color(p.critical));
+                }
+            });
+            let when = if !current.is_empty() {
+                format!("On {} now", current.join(", "))
+            } else if r.last_used > 0 {
+                format!("Used {}", ago(now_secs().saturating_sub(r.last_used)))
+            } else {
+                String::new()
+            };
+            ui.label(RichText::new(when).font(theme::font(theme::CAPTION)).color(p.text3));
+            ui.add_space(4.0);
+
+            ui.horizontal(|ui| {
+                if exists {
+                    if widgets::accent_button(ui, p, None, "Use", true).clicked() {
+                        action = Some(HistoryAction::Use(r.clone()));
+                    }
+                } else if let Some(url) = &r.url
+                    && widgets::button(ui, p, Some(icon::DOWNLOAD), "Download again").clicked()
+                {
+                    action = Some(HistoryAction::Redownload(url.clone()));
+                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let glyph = if showing_info { icon::CHEVRON_UP } else { icon::EDIT };
+                    let tip = if showing_info { "Hide details" } else { "Path and properties" };
+                    if widgets::icon_button(ui, p, glyph, 14.0).on_hover_text(tip).clicked() {
+                        action = Some(HistoryAction::ToggleInfo(r.path.clone()));
+                    }
+                });
+            });
+
+            if showing_info {
+                ui.add_space(6.0);
+                let line = ui.available_rect_before_wrap();
+                ui.painter().hline(line.x_range(), line.top(), Stroke::new(1.0_f32, p.card_stroke));
+                ui.add_space(8.0);
+                let key = |ui: &mut Ui, k: &str| {
+                    ui.label(RichText::new(k).font(theme::font(theme::CAPTION)).color(p.text3));
+                };
+                key(ui, if exists { "Path" } else { "Last known path" });
+                ui.horizontal_top(|ui| {
+                    ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                        if widgets::icon_button(ui, p, icon::COPY, 12.0).on_hover_text("Copy path").clicked() {
+                            ui.ctx().copy_text(r.path.display().to_string());
+                        }
+                        ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
+                            ui.add(egui::Label::new(RichText::new(r.path.display().to_string()).font(theme::font(theme::CAPTION))).wrap());
+                        });
+                    });
+                });
+                let kind = match r.kind {
+                    wallset_core::MediaKind::Image => "Image",
+                    wallset_core::MediaKind::Video => "Video",
+                    wallset_core::MediaKind::AnimatedImage => "Animation",
+                };
+                let mut facts = format!("{kind} · {}", fit_label(r.fit));
+                if let Some(modified) = meta.as_ref().and_then(|m| m.modified().ok()) {
+                    let age = std::time::SystemTime::now().duration_since(modified).map_or(0, |d| d.as_secs());
+                    facts.push_str(&format!(" · changed {}", ago(age)));
+                }
+                ui.add_space(2.0);
+                ui.label(RichText::new(facts).font(theme::font(theme::CAPTION)).color(p.text2));
+                if let Some(url) = &r.url {
+                    ui.add_space(2.0);
+                    key(ui, "Downloaded from");
+                    ui.horizontal(|ui| {
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if widgets::icon_button(ui, p, icon::COPY, 12.0).on_hover_text("Copy link").clicked() {
+                                ui.ctx().copy_text(url.clone());
+                            }
+                            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                                ui.add(egui::Label::new(RichText::new(url).font(theme::font(theme::CAPTION))).truncate());
+                            });
+                        });
+                    });
+                }
+                ui.add_space(6.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+                    if exists {
+                        if widgets::button(ui, p, Some(icon::FOLDER), "Show in folder").clicked() {
+                            action = Some(HistoryAction::Reveal(r.path.clone()));
+                        }
+                        if widgets::button(ui, p, Some(icon::EDIT), "Properties").clicked() {
+                            action = Some(HistoryAction::Properties(r.path.clone()));
+                        }
+                    }
+                    if current.is_empty() && widgets::button(ui, p, Some(icon::DELETE), "Remove").clicked() {
+                        action = Some(HistoryAction::Forget(r.path.clone()));
+                    }
+                });
+            }
+        });
+        action
+    }
+}
+
 // --- Display page ---------------------------------------------------------
 
 impl App {
@@ -1139,6 +1530,65 @@ fn slider_cell(ui: &mut Ui, enabled: bool, slider: egui::Slider) -> egui::Respon
 fn settled(r: &egui::Response) -> bool {
     r.drag_stopped() || (r.changed() && !r.dragged())
 }
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+/// "today", "3 days ago", "5 weeks ago": no calendar needed for history.
+fn ago(secs: u64) -> String {
+    let days = secs / 86_400;
+    match days {
+        0 => "today".into(),
+        1 => "yesterday".into(),
+        2..=13 => format!("{days} days ago"),
+        14..=60 => format!("{} weeks ago", days / 7),
+        61..=729 => format!("{} months ago", days / 30),
+        _ => format!("{} years ago", days / 365),
+    }
+}
+
+fn human_size(bytes: u64) -> String {
+    let mb = bytes as f64 / 1_000_000.0;
+    if mb >= 1000.0 { format!("{:.1} GB", mb / 1000.0) } else if mb >= 1.0 { format!("{mb:.1} MB") } else { format!("{} KB", bytes / 1000) }
+}
+
+/// Open Explorer with the file selected.
+fn reveal_in_explorer(path: &Path) {
+    let mut cmd = std::process::Command::new("explorer.exe");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // Explorer wants `/select,"path"` as one raw argument.
+        cmd.raw_arg(format!("/select,\"{}\"", path.display()));
+    }
+    let _ = cmd.spawn();
+}
+
+/// The Windows Properties dialog for a file, where its details (title,
+/// tags, rating) can be edited.
+#[cfg(windows)]
+fn show_properties(path: &Path) {
+    use windows::Win32::UI::Shell::{SEE_MASK_INVOKEIDLIST, SHELLEXECUTEINFOW, ShellExecuteExW};
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOW;
+    use windows::core::{HSTRING, PCWSTR, w};
+    let file = HSTRING::from(path.as_os_str());
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_INVOKEIDLIST,
+        lpVerb: w!("properties"),
+        lpFile: PCWSTR(file.as_ptr()),
+        nShow: SW_SHOW.0,
+        ..Default::default()
+    };
+    // SAFETY: `info` and the strings it points to outlive the call.
+    unsafe {
+        let _ = ShellExecuteExW(&mut info);
+    }
+}
+
+#[cfg(not(windows))]
+fn show_properties(_path: &Path) {}
 
 fn file_name(path: &std::path::Path) -> String {
     path.file_name().map_or_else(|| path.display().to_string(), |f| f.to_string_lossy().into_owned())

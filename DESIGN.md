@@ -38,6 +38,15 @@ replace the earlier Windows 11 Settings look.
   / Stretch, Choose file, Preview, Apply. Below the dock one summary line: the
   file, its cost, its fit, its format, and "Details", which opens a panel with
   the cost (estimated, then measured during preview) and the fit check.
+- **History:** every wallpaper applied before, newest first, as cards with a
+  thumbnail. Each says whether the file is still on this PC ("Missing: moved or
+  deleted" otherwise), when it was used, and offers Use (or Download again
+  for a missing file that came from a link). The pencil icon opens the path,
+  type, fit, last change and source link, with Show in folder, the Windows
+  Properties dialog, and Remove.
+- **From link:** a dock button opens a link field in place of the summary
+  line. The file is downloaded once (Windows' own curl.exe) into
+  `%LOCALAPPDATA%\wallSet\downloads`, then treated like a chosen file.
 - **Display:** the capability report as a settings list, gamut meters, and the
   best files for this display, in a centred column.
 - **Performance:** status, then toggles and sliders in settings rows. Each

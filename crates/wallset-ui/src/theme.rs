@@ -52,6 +52,10 @@ pub mod icon {
     pub const CHIP: char = '\u{E950}';
     pub const CHEVRON_DOWN: char = '\u{E70D}';
     pub const CHEVRON_UP: char = '\u{E70E}';
+    pub const LINK: char = '\u{E71B}';
+    pub const DOWNLOAD: char = '\u{E896}';
+    pub const EDIT: char = '\u{E70F}';
+    pub const FOLDER: char = '\u{E838}';
 }
 
 #[derive(Clone, Copy)]

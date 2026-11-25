@@ -19,7 +19,11 @@ if (-not $cargo) {
 
 Push-Location $root
 try {
+    # cargo reports progress on stderr; Windows PowerShell 5.1 would turn
+    # that into a terminating error when output is redirected.
+    $ErrorActionPreference = "Continue"
     & $cargo build --release --workspace
+    $ErrorActionPreference = "Stop"
     if ($LASTEXITCODE -ne 0) { throw "cargo build failed (exit $LASTEXITCODE)" }
     New-Item -ItemType Directory -Force $Out | Out-Null
     foreach ($exe in "wallset.exe", "wallset-daemon.exe", "wallset-render.exe", "wallset-ui.exe") {

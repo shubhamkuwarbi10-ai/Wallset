@@ -20,6 +20,8 @@ A settings window opened occasionally from the tray or Start menu, used for a mi
 
 ## Capabilities and Constraints
 - Per-monitor assignment; fit modes Fill (crop), Fit (bars), Stretch.
+- History of applied wallpapers, flagging files that no longer exist.
+- Wallpapers from web links: downloaded once to a local folder, never streamed (a looping stream would re-fetch, fail offline, and Windows needs a local file for still images).
 - The preview is a native child window placed over a fixed rectangle. Nothing in the UI (menus, combo popups, tooltips) may open over that rectangle while previewing.
 - Repaint is reactive; an idle settings window must use no CPU.
 - Fitness findings carry severities: Problem, Warning, Advice, Info, with optional ffmpeg fix commands.

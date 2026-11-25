@@ -129,8 +129,9 @@ fn accent_of(img: &ColorImage) -> Option<Color32> {
     Some(Hsva::new(Hsva::from(mean).h, 0.6, 1.0, 1.0).into())
 }
 
+/// The Windows thumbnail of a file, at most `max` pixels on its long side.
 #[cfg(windows)]
-fn thumbnail(path: &Path, max: i32) -> Option<ColorImage> {
+pub fn thumbnail(path: &Path, max: i32) -> Option<ColorImage> {
     use windows::Win32::Foundation::SIZE;
     use windows::Win32::Graphics::Gdi::{
         BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC, DeleteObject,
@@ -179,7 +180,7 @@ fn thumbnail(path: &Path, max: i32) -> Option<ColorImage> {
 }
 
 #[cfg(not(windows))]
-fn thumbnail(_path: &Path, _max: i32) -> Option<ColorImage> {
+pub fn thumbnail(_path: &Path, _max: i32) -> Option<ColorImage> {
     None
 }
 
