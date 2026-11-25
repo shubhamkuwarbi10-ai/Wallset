@@ -93,10 +93,6 @@ pub fn probe(lib: &Library, path: &Path) -> Result<MediaProbe, ProbeError> {
         // Report the decoder, not the probe's copy-back transport.
         .map(|h| h.trim_end_matches("-copy").to_string());
 
-    let bitrate = duration
-        .filter(|_| kind.needs_renderer())
-        .map(|d| (meta.len() as f64 * 8.0 / d) as u64);
-
     Ok(MediaProbe {
         path: path.to_path_buf(),
         kind,
@@ -107,7 +103,6 @@ pub fn probe(lib: &Library, path: &Path) -> Result<MediaProbe, ProbeError> {
         fps: if kind == MediaKind::Image { None } else { fps },
         duration_secs: if kind == MediaKind::Image { None } else { duration },
         file_size_bytes: meta.len(),
-        bitrate_bps: bitrate,
         transfer: ColorTransfer::from_mpv(&mpv.get("video-params/gamma").unwrap_or_default()),
         primaries: SourcePrimaries::from_mpv(
             &mpv.get("video-params/primaries").unwrap_or_default(),

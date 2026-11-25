@@ -41,18 +41,15 @@ pub fn scan(monitors: &[Rect]) -> Scan {
 
     let coverage = monitors
         .iter()
-        .map(|m| windows.iter().map(|w| m.coverage_by(&w.rect)).fold(0.0, f64::max))
+        .map(|m| windows.iter().map(|w| m.coverage_by(w)).fold(0.0, f64::max))
         .collect();
 
     let fullscreen = fullscreen_per_monitor(monitors);
     Scan { coverage, fullscreen }
 }
 
-struct Win {
-    rect: Rect,
-}
 
-fn visible_top_level() -> Vec<Win> {
+fn visible_top_level() -> Vec<Rect> {
     unsafe extern "system" fn cb(h: HWND, data: LPARAM) -> BOOL {
         // SAFETY: data is the Vec below, alive for this synchronous call.
         let out = unsafe { &mut *(data.0 as *mut Vec<HWND>) };
@@ -65,8 +62,8 @@ fn visible_top_level() -> Vec<Win> {
 
     all.into_iter()
         .filter(|&h| counts_as_covering(h))
-        .filter_map(|h| window_rect(h).map(|rect| Win { rect }))
-        .filter(|w| w.rect.width > 0 && w.rect.height > 0)
+        .filter_map(window_rect)
+        .filter(|r| r.width > 0 && r.height > 0)
         .collect()
 }
 

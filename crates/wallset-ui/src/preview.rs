@@ -48,19 +48,9 @@ impl Preview {
         let window = HostWindow::create_child(parent, rect.0, rect.1, rect.2, rect.3).map_err(|e| e.to_string())?;
         let exe = std::env::current_exe().map_err(|e| e.to_string())?.with_file_name("wallset-render.exe");
         let mut cmd = Command::new(&exe);
-        cmd.args(["--wid", &window.raw().to_string(), "--file"]).arg(file).args(["--fit", fit.as_arg()]);
-        if let Some(a) = adapter {
-            cmd.args(["--adapter", a]);
-        }
-        if !render.hardware_decode {
-            cmd.arg("--no-hwdec");
-        }
-        if !render.low_power {
-            cmd.arg("--quality");
-        }
-        if !render.efficiency_mode {
-            cmd.arg("--foreground");
-        }
+        cmd.args(["--wid", &window.raw().to_string(), "--file"])
+            .arg(file)
+            .args(render.renderer_args(fit, adapter));
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;

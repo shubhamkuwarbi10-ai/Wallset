@@ -40,7 +40,6 @@ impl HostWindow {
     }
     pub fn show(&self) {}
     pub fn hide(&self) {}
-    pub fn reposition(&self, _bounds: Rect) {}
 }
 
 pub fn set_static_wallpaper(_bounds: Rect, _path: &Path) -> Result<(), SurfaceError> {

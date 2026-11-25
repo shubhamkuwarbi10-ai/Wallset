@@ -308,10 +308,6 @@ impl Mpv {
         self.shared.check(rc, "initialize")
     }
 
-    pub fn set_property(&self, name: &str, value: &str) -> Result<(), MpvError> {
-        self.shared.set_property(name, value)
-    }
-
     /// Read a property as a string. `None` when it is unavailable, which for
     /// many properties simply means "not known yet" or "not applicable".
     #[must_use]

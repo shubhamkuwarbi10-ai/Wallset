@@ -9,12 +9,6 @@ fn env_dir(var: &str) -> PathBuf {
     std::env::var_os(var).map_or_else(std::env::temp_dir, PathBuf::from).join("wallSet")
 }
 
-/// `%APPDATA%\wallSet\config.json` — roams with the user profile.
-#[must_use]
-pub fn config_file() -> PathBuf {
-    env_dir("APPDATA").join("config.json")
-}
-
 /// `%LOCALAPPDATA%\wallSet` — machine-local: logs and freeze frames.
 #[must_use]
 pub fn local_dir() -> PathBuf {
@@ -35,22 +29,16 @@ pub fn freeze_frame(monitor_id: &str) -> PathBuf {
 /// A corrupt file is kept aside rather than overwritten, so a hand edit with
 /// a typo is not silently lost.
 pub fn load_config() -> Config {
-    let path = config_file();
-    let mut cfg = match std::fs::read_to_string(&path) {
-        Ok(s) => serde_json::from_str::<Config>(&s).unwrap_or_else(|e| {
-            log(&format!("config unreadable ({e}); using defaults, original kept as config.json.bad"));
-            let _ = std::fs::rename(&path, path.with_extension("json.bad"));
-            Config::default()
-        }),
-        Err(_) => Config::default(),
-    };
-    cfg.sanitise();
+    let (cfg, err) = Config::load_from(&wallset_core::config::default_path());
+    if let Some(e) = err {
+        log(&format!("config unreadable ({e}); using defaults, original kept as config.json.bad"));
+    }
     cfg
 }
 
 pub fn ensure_dirs() {
     let _ = std::fs::create_dir_all(local_dir().join("frames"));
-    if let Some(p) = config_file().parent() {
+    if let Some(p) = wallset_core::config::default_path().parent() {
         let _ = std::fs::create_dir_all(p);
     }
 }

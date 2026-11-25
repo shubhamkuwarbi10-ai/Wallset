@@ -11,7 +11,7 @@ use crate::media::MediaKind;
 use crate::monitor::MonitorId;
 use crate::policy::PolicyConfig;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// How the image is mapped onto a screen of a different aspect ratio.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -62,34 +62,43 @@ pub struct RenderSettings {
     pub prefer_power_saving_gpu: bool,
 }
 
+impl RenderSettings {
+    /// Command-line flags for `wallset-render`. The one place they are built,
+    /// shared by the service and the settings preview, so the preview cannot
+    /// drift from what the wallpaper actually runs.
+    #[must_use]
+    pub fn renderer_args(&self, fit: FitMode, adapter: Option<&str>) -> Vec<String> {
+        let mut a = vec!["--fit".to_string(), fit.as_arg().to_string()];
+        if let Some(ad) = adapter {
+            a.extend(["--adapter".to_string(), ad.to_string()]);
+        }
+        for (off, flag) in [
+            (!self.hardware_decode, "--no-hwdec"),
+            (!self.low_power, "--quality"),
+            (!self.efficiency_mode, "--foreground"),
+        ] {
+            if off {
+                a.push(flag.to_string());
+            }
+        }
+        a
+    }
+}
+
 impl Default for RenderSettings {
     fn default() -> Self {
         Self { hardware_decode: true, low_power: true, efficiency_mode: true, prefer_power_saving_gpu: true }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    /// Schema version, for future migrations.
-    pub version: u32,
     pub assignments: Vec<Assignment>,
     pub policy: PolicyConfig,
     pub render: RenderSettings,
     /// Start the daemon when the user signs in.
     pub start_with_windows: bool,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            version: 1,
-            assignments: Vec::new(),
-            policy: PolicyConfig::default(),
-            render: RenderSettings::default(),
-            start_with_windows: false,
-        }
-    }
 }
 
 impl Config {
@@ -112,6 +121,56 @@ impl Config {
     pub fn sanitise(&mut self) {
         self.policy.sanitise();
     }
+
+    /// Load and sanitise. A missing file gives defaults. A corrupt one also
+    /// gives defaults, is moved aside to `config.json.bad` so a hand edit is
+    /// not lost, and the parse error is returned for the caller to report.
+    #[must_use]
+    pub fn load_from(path: &Path) -> (Self, Option<String>) {
+        let (mut cfg, err) = match std::fs::read_to_string(path) {
+            Ok(s) => match serde_json::from_str::<Self>(&s) {
+                Ok(c) => (c, None),
+                Err(e) => {
+                    let _ = std::fs::rename(path, path.with_extension("json.bad"));
+                    (Self::default(), Some(e.to_string()))
+                }
+            },
+            Err(_) => (Self::default(), None),
+        };
+        cfg.sanitise();
+        (cfg, err)
+    }
+
+    /// Write atomically: a crash mid-write must never leave a truncated file.
+    pub fn save_to(&self, path: &Path) -> std::io::Result<()> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_string_pretty(self).map_err(std::io::Error::other)?)?;
+        std::fs::rename(tmp, path)
+    }
+
+    /// Read-modify-write: load from disk, apply `change`, save. Never writes
+    /// a caller's stale snapshot, so edits made elsewhere since the caller
+    /// loaded its copy survive.
+    pub fn update_at(path: &Path, change: impl FnOnce(&mut Self)) -> std::io::Result<Self> {
+        let (mut fresh, _) = Self::load_from(path);
+        change(&mut fresh);
+        fresh.sanitise();
+        fresh.save_to(path)?;
+        Ok(fresh)
+    }
+}
+
+/// `%APPDATA%\wallSet\config.json`, roaming with the user profile (the temp
+/// directory where `APPDATA` is unset).
+#[must_use]
+pub fn default_path() -> PathBuf {
+    std::env::var_os("APPDATA")
+        .map_or_else(std::env::temp_dir, PathBuf::from)
+        .join("wallSet")
+        .join("config.json")
 }
 
 #[cfg(test)]
@@ -125,6 +184,53 @@ mod tests {
             kind: MediaKind::Video,
             fit: FitMode::Fill,
         }
+    }
+
+    #[test]
+    fn renderer_args_default_to_fit_only() {
+        assert_eq!(RenderSettings::default().renderer_args(FitMode::Fill, None), ["--fit", "fill"]);
+    }
+
+    #[test]
+    fn renderer_args_carry_every_non_default_setting() {
+        let r = RenderSettings { hardware_decode: false, low_power: false, efficiency_mode: false, ..Default::default() };
+        let a = r.renderer_args(FitMode::Fit, Some("Intel(R) UHD Graphics"));
+        assert_eq!(
+            a,
+            ["--fit", "fit", "--adapter", "Intel(R) UHD Graphics", "--no-hwdec", "--quality", "--foreground"]
+        );
+    }
+
+    #[test]
+    fn update_keeps_assignments_written_by_someone_else() {
+        let dir = std::env::temp_dir().join(format!("wallset-core-test-{}", std::process::id()));
+        let path = dir.join("config.json");
+        // A settings window loads its snapshot (no assignments)...
+        let (stale, _) = Config::load_from(&path);
+        // ...meanwhile another writer assigns a wallpaper...
+        let mut other = Config::default();
+        other.assign(a("M1", "elsewhere.mp4"));
+        other.save_to(&path).unwrap();
+        // ...then the window saves a settings change.
+        let low_power = !stale.render.low_power;
+        let saved = Config::update_at(&path, |c| c.render.low_power = low_power).unwrap();
+        assert_eq!(saved.render.low_power, low_power, "our change applied");
+        assert_eq!(saved.assignments.len(), 1, "the other writer's assignment survived");
+        assert_eq!(Config::load_from(&path).0, saved, "and that is what is on disk");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn corrupt_file_yields_defaults_and_is_kept_aside() {
+        let dir = std::env::temp_dir().join(format!("wallset-core-bad-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        std::fs::write(&path, "{ not json").unwrap();
+        let (cfg, err) = Config::load_from(&path);
+        assert_eq!(cfg, Config::default());
+        assert!(err.is_some());
+        assert!(path.with_extension("json.bad").exists(), "the hand-edited file is preserved");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -146,7 +252,7 @@ mod tests {
     #[test]
     fn unknown_fields_from_a_newer_version_are_ignored() {
         let c: Config = serde_json::from_str(r#"{"version": 9, "future_feature": true}"#).unwrap();
-        assert_eq!(c.version, 9);
+        assert_eq!(c, Config::default());
     }
 
     #[test]

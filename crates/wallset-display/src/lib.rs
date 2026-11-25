@@ -18,8 +18,6 @@ use wallset_core::Monitor;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DisplayError {
-    #[error("display enumeration failed: {0}")]
-    Enumeration(String),
     #[error("no displays are attached to the desktop")]
     NoDisplays,
     #[error("display probing is not implemented on this platform yet")]

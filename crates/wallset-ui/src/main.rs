@@ -68,7 +68,7 @@ impl App {
             Ok(m) => (m, None),
             Err(e) => (Vec::new(), Some(e.to_string())),
         };
-        let cfg = service::load_config();
+        let cfg = Config::load_from(&wallset_core::config::default_path()).0;
         let adapter = cfg.render.prefer_power_saving_gpu.then(wallset_display::power_saving_adapter).flatten();
         Self {
             monitors,
@@ -166,7 +166,9 @@ impl App {
     /// that would silently undo anything changed on disk since the window
     /// opened (another settings window, a hand edit, the CLI).
     fn commit(&mut self, what: &str, change: impl FnOnce(&mut Config)) {
-        let result = service::update_config(change).map_err(|e| e.to_string()).and_then(|fresh| {
+        let result = Config::update_at(&wallset_core::config::default_path(), change)
+            .map_err(|e| e.to_string())
+            .and_then(|fresh| {
             self.cfg = fresh;
             service::notify_or_start_daemon()
         });

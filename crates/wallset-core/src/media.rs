@@ -99,7 +99,6 @@ pub struct MediaProbe {
     pub fps: Option<f64>,
     pub duration_secs: Option<f64>,
     pub file_size_bytes: u64,
-    pub bitrate_bps: Option<u64>,
     pub transfer: ColorTransfer,
     pub primaries: SourcePrimaries,
     /// Hardware decoder actually selected, from mpv's `hwdec-current`.

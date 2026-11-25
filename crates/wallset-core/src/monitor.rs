@@ -179,12 +179,10 @@ pub struct ColorCapabilities {
     /// Sustained luminance for a full white field, in nits. Usually far lower
     /// than peak, and the more honest number for a full-screen wallpaper.
     pub max_full_frame_luminance_nits: Option<f32>,
-    pub min_luminance_nits: Option<f32>,
     /// Measured primaries, when the OS reports them.
     pub red: Option<XyChromaticity>,
     pub green: Option<XyChromaticity>,
     pub blue: Option<XyChromaticity>,
-    pub white: Option<XyChromaticity>,
 }
 
 impl ColorCapabilities {
@@ -215,7 +213,6 @@ impl ColorCapabilities {
 pub struct AdapterInfo {
     pub name: String,
     pub dedicated_video_memory_bytes: u64,
-    pub shared_system_memory_bytes: u64,
     /// True when the adapter is a software renderer (WARP, llvmpipe). Video
     /// wallpaper on a software adapter is a bad idea and we say so.
     pub is_software: bool,
@@ -236,9 +233,6 @@ pub struct Monitor {
     /// Panel's native/preferred mode, when known. Running off-native is a
     /// common and fixable cause of a blurry wallpaper.
     pub native_mode: Option<Mode>,
-    /// Highest refresh rate the panel advertises, for "you could be running
-    /// faster" hints.
-    pub max_refresh_hz: Option<f64>,
     pub dpi: u32,
     /// OS scale factor, e.g. 1.5 for 150%.
     pub scale: f32,
@@ -247,6 +241,13 @@ pub struct Monitor {
 }
 
 impl Monitor {
+    /// Highest refresh rate the panel offers: that of its native mode,
+    /// which is chosen as the fastest mode at the largest resolution.
+    #[must_use]
+    pub fn max_refresh_hz(&self) -> Option<f64> {
+        self.native_mode.map(|n| n.refresh_hz)
+    }
+
     /// Physical pixels the wallpaper must fill on this monitor.
     #[must_use]
     pub const fn pixel_count(&self) -> u64 {
@@ -320,7 +321,7 @@ impl Monitor {
             let note = if self.is_scaled_down() { "  (not running at native resolution)" } else { "" };
             rows.push(("Native resolution", format!("{}x{}{note}", n.width, n.height)));
         }
-        if let Some(max) = self.max_refresh_hz {
+        if let Some(max) = self.max_refresh_hz() {
             rows.push(("Max refresh", format!("{max:.0} Hz")));
         }
         rows.push(("Scaling", format!("{:.0}% ({} DPI)", self.scale * 100.0, self.dpi)));
@@ -389,41 +390,23 @@ const REC2020_PRIMARIES: [(f32, f32); 3] =
 /// Both are convex, so Sutherland–Hodgman clipping gives an exact
 /// intersection polygon.
 fn coverage_of(panel: &[(f32, f32); 3], reference: &[(f32, f32); 3]) -> f32 {
-    let ref_area = triangle_area(reference);
+    let ref_area = signed_area(reference).abs();
     if ref_area <= f32::EPSILON {
         return 0.0;
     }
-    let clipped = clip_polygon(&panel.to_vec(), reference);
-    (polygon_area(&clipped) / ref_area).clamp(0.0, 1.0)
-}
-
-fn triangle_area(t: &[(f32, f32); 3]) -> f32 {
-    polygon_area(t.as_ref())
-}
-
-/// Shoelace formula, absolute value so winding order does not matter.
-fn polygon_area(poly: &[(f32, f32)]) -> f32 {
-    if poly.len() < 3 {
-        return 0.0;
-    }
-    let mut acc = 0.0f32;
-    for i in 0..poly.len() {
-        let (x0, y0) = poly[i];
-        let (x1, y1) = poly[(i + 1) % poly.len()];
-        acc += x0 * y1 - x1 * y0;
-    }
-    (acc / 2.0).abs()
+    let clipped = clip_polygon(panel, reference);
+    (signed_area(&clipped).abs() / ref_area).clamp(0.0, 1.0)
 }
 
 /// Clip `subject` against each edge of the convex `clip` triangle.
-fn clip_polygon(subject: &Vec<(f32, f32)>, clip: &[(f32, f32); 3]) -> Vec<(f32, f32)> {
+fn clip_polygon(subject: &[(f32, f32)], clip: &[(f32, f32); 3]) -> Vec<(f32, f32)> {
     // Normalise winding so "inside" is consistently the left-hand side.
     let mut clip_poly = clip.to_vec();
     if signed_area(&clip_poly) < 0.0 {
         clip_poly.reverse();
     }
 
-    let mut output = subject.clone();
+    let mut output = subject.to_vec();
     for i in 0..clip_poly.len() {
         if output.is_empty() {
             break;
@@ -453,6 +436,7 @@ fn clip_polygon(subject: &Vec<(f32, f32)>, clip: &[(f32, f32); 3]) -> Vec<(f32, 
     output
 }
 
+/// Shoelace formula. Sign gives winding; `.abs()` gives area.
 fn signed_area(poly: &[(f32, f32)]) -> f32 {
     let mut acc = 0.0f32;
     for i in 0..poly.len() {
@@ -494,11 +478,9 @@ mod tests {
             hdr_enabled: false,
             max_luminance_nits: None,
             max_full_frame_luminance_nits: None,
-            min_luminance_nits: None,
             red: Some(XyChromaticity::new(r.0, r.1)),
             green: Some(XyChromaticity::new(g.0, g.1)),
             blue: Some(XyChromaticity::new(b.0, b.1)),
-            white: None,
         }
     }
 

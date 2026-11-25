@@ -115,56 +115,10 @@ fn cmd_displays(json: bool) -> Result<(), String> {
 }
 
 fn print_monitor(n: usize, m: &Monitor) {
-    let c = &m.color;
-    println!(
-        "Display {n}: {}{}",
-        m.friendly_name,
-        if m.is_primary { "  [primary]" } else { "" }
-    );
-    println!("  What it is      {}", m.class_label());
-    println!("  Connection      {}", m.connector.label());
-    println!("  Current mode    {}", m.current_mode);
-    if let Some(native) = m.native_mode {
-        let note = if m.is_scaled_down() { "  <- not running at native resolution" } else { "" };
-        println!("  Native mode     {native}{note}");
+    println!("Display {n}: {}{}", m.friendly_name, if m.is_primary { "  [primary]" } else { "" });
+    for (k, v) in m.describe() {
+        println!("  {k:<18}{v}");
     }
-    if let Some(max) = m.max_refresh_hz {
-        println!("  Max refresh     {max:.0} Hz");
-    }
-    println!("  Scaling         {:.0}% ({} DPI)", m.scale * 100.0, m.dpi);
-    println!("  Position        {},{}  {}x{}", m.bounds.x, m.bounds.y, m.bounds.width, m.bounds.height);
-    println!("  Colour depth    {}-bit per channel", c.bits_per_channel);
-    println!(
-        "  HDR             {}",
-        match (c.hdr_supported, c.hdr_enabled) {
-            (true, true) => "supported, ON",
-            (true, false) => "supported, off  (Settings > System > Display > Use HDR)",
-            _ => "not supported",
-        }
-    );
-    match (c.max_luminance_nits, c.max_full_frame_luminance_nits) {
-        (Some(peak), Some(full)) => println!(
-            "  Brightness      {peak:.0} nits peak, {full:.0} nits full-screen sustained"
-        ),
-        (Some(peak), None) => println!("  Brightness      {peak:.0} nits peak"),
-        _ => println!("  Brightness      not reported by the display"),
-    }
-    match c.gamut_coverage() {
-        Some(g) => println!(
-            "  Colour gamut    {}  (sRGB {:.0}%, DCI-P3 {:.0}%, Rec.2020 {:.0}%)",
-            g.headline(),
-            g.srgb * 100.0,
-            g.display_p3 * 100.0,
-            g.rec2020 * 100.0
-        ),
-        None => println!("  Colour gamut    not reported by the display"),
-    }
-    let vram = m.adapter.dedicated_video_memory_bytes as f64 / (1u64 << 30) as f64;
-    println!(
-        "  Graphics        {}{}",
-        m.adapter.name,
-        if vram > 0.05 { format!(" ({vram:.1} GB dedicated)") } else { String::new() }
-    );
     if m.adapter.is_software {
         println!("                  ^ software renderer: video wallpaper is not recommended");
     }

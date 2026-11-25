@@ -32,20 +32,11 @@ pub enum Tier {
     Suspended,
 }
 
-impl Tier {
-    /// Whether a renderer process should exist at all in this tier.
-    #[must_use]
-    pub const fn needs_render_process(self) -> bool {
-        matches!(self, Self::Visible | Self::Occluded)
-    }
-}
-
 /// Why the engine chose the tier it did. Surfaced in the UI and the log, so
 /// that "my wallpaper stopped" is self-diagnosing rather than a support ticket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Reason {
     DesktopVisible,
-    StaticWallpaper,
     MonitorPoweredOff,
     FullscreenApp,
     BatteryLow,
@@ -62,7 +53,6 @@ impl Reason {
     pub const fn explain(self) -> &'static str {
         match self {
             Self::DesktopVisible => "desktop is visible",
-            Self::StaticWallpaper => "wallpaper is a still image; no renderer needed",
             Self::MonitorPoweredOff => "monitor is powered off",
             Self::FullscreenApp => "a fullscreen application is in the foreground",
             Self::BatteryLow => "running on battery below the configured threshold",
@@ -90,9 +80,6 @@ pub struct PolicyInputs {
     pub session_locked: bool,
     pub on_battery: bool,
     pub battery_percent: Option<u8>,
-    /// False when the active wallpaper is a still image, which needs no
-    /// renderer at all.
-    pub media_is_video: bool,
     /// The user chose "Pause video wallpapers" in the tray menu.
     pub user_paused: bool,
 }
@@ -106,7 +93,6 @@ impl Default for PolicyInputs {
             session_locked: false,
             on_battery: false,
             battery_percent: None,
-            media_is_video: true,
             user_paused: false,
         }
     }
@@ -212,16 +198,6 @@ impl PolicyEngine {
         self.reason
     }
 
-    #[must_use]
-    pub const fn config(&self) -> &PolicyConfig {
-        &self.cfg
-    }
-
-    pub fn set_config(&mut self, mut cfg: PolicyConfig) {
-        cfg.sanitise();
-        self.cfg = cfg;
-    }
-
     /// Feed the current OS signals in and get back a transition, if any.
     ///
     /// Returns `None` when nothing changed, which is the common case — the
@@ -254,12 +230,6 @@ impl PolicyEngine {
     }
 
     fn evaluate(&mut self, i: &PolicyInputs, now_ms: u64) -> (Tier, Reason) {
-        // A still image needs no renderer in any state.
-        if !i.media_is_video {
-            self.clear_timers();
-            return (Tier::Suspended, Reason::StaticWallpaper);
-        }
-
         // Hard suspends: reclaim everything immediately, no grace period.
         if i.user_paused {
             self.clear_timers();
@@ -359,16 +329,6 @@ mod tests {
         assert_eq!(t, None, "already Visible, so no transition is emitted");
         assert_eq!(e.tier(), Tier::Visible);
         assert_eq!(e.next_deadline_ms(), None, "nothing pending means no timer");
-    }
-
-    #[test]
-    fn static_wallpaper_never_spawns_a_renderer() {
-        let mut e = engine();
-        let i = PolicyInputs { media_is_video: false, ..Default::default() };
-        e.update(&i, 0);
-        assert_eq!(e.tier(), Tier::Suspended);
-        assert!(!e.tier().needs_render_process());
-        assert_eq!(e.reason(), Reason::StaticWallpaper);
     }
 
     #[test]

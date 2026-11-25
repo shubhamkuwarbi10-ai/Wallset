@@ -10,7 +10,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 use wallset_core::Monitor;
 use wallset_surface::process::{self, ProcessStats};
-use wallset_surface::{DesktopHost, get_static_wallpaper, set_static_wallpaper};
+use wallset_surface::{DesktopHost, HostWindow, get_static_wallpaper, set_static_wallpaper};
 use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, MSG, MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx, PM_REMOVE,
     PeekMessageW, QS_ALLINPUT, TranslateMessage,
@@ -81,38 +81,53 @@ fn send(child: &mut Child, line: &str) {
     }
 }
 
-pub fn run(file: &Path, m: &Monitor) -> Result<(), String> {
+/// A renderer drawing into a fresh host window behind the desktop icons,
+/// already past its first frame.
+struct Playing {
+    host: DesktopHost,
+    win: HostWindow,
+    child: Child,
+    first_frame_ms: u128,
+}
+
+fn start(file: &Path, m: &Monitor, extra: &[String]) -> Result<Playing, String> {
     let file = std::path::absolute(file).map_err(|e| e.to_string())?;
     let host = DesktopHost::acquire().map_err(|e| e.to_string())?;
     let win = host.create_window(m.bounds).map_err(|e| e.to_string())?;
-    println!("Desktop layout: {:?}. Host window {:#x} on {} at {:?}.", host.layout(), win.raw(), m.friendly_name, m.bounds);
-    println!("Minimise your windows (Win+D) to watch.\n");
-
-    let original_wallpaper = get_static_wallpaper(m.bounds).ok();
-
+    let mut cmd = Command::new(render_exe()?);
+    cmd.args(["--wid", &win.raw().to_string(), "--file"]).arg(&file).arg("--show-on-ready");
+    for o in extra {
+        cmd.args(["--mpv-opt", o]);
+    }
     let spawned = Instant::now();
-    let mut child = Command::new(render_exe()?)
-        .args(["--wid", &win.raw().to_string(), "--file"])
-        .arg(&file)
-        .arg("--show-on-ready")
-        .stdin(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("spawning renderer: {e}"))?;
-    let pid = child.id();
+    let mut child = cmd.stdin(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| e.to_string())?;
 
-    // Wait until the renderer shows the window (first frame), or give up.
+    // The renderer shows the window on its first frame.
     let deadline = Instant::now() + Duration::from_secs(10);
     while !win.is_visible() && Instant::now() < deadline {
         pump_for(Duration::from_millis(20));
         if let Ok(Some(st)) = child.try_wait() {
-            return Err(format!("renderer exited early with {st}"));
+            let mut err = String::new();
+            if let Some(mut e) = child.stderr.take() {
+                let _ = std::io::Read::read_to_string(&mut e, &mut err);
+            }
+            return Err(format!("renderer exited early ({st}): {}", err.trim()));
         }
     }
     if !win.is_visible() {
         let _ = child.kill();
         return Err("no first frame within 10 s".into());
     }
-    println!("[T0] first frame on screen after {} ms", spawned.elapsed().as_millis());
+    Ok(Playing { host, win, child, first_frame_ms: spawned.elapsed().as_millis() })
+}
+
+pub fn run(file: &Path, m: &Monitor) -> Result<(), String> {
+    let original_wallpaper = get_static_wallpaper(m.bounds).ok();
+    let Playing { host, win, mut child, first_frame_ms } = start(file, m, &[])?;
+    let pid = child.id();
+    println!("Desktop layout: {:?}. Host window {:#x} on {} at {:?}.", host.layout(), win.raw(), m.friendly_name, m.bounds);
+    println!("Minimise your windows (Win+D) to watch.\n");
+    println!("[T0] first frame on screen after {first_frame_ms} ms");
 
     pump_for(Duration::from_secs(3)); // let startup allocations settle
     let (cpu0, priv0, ws0) = measure(pid, Duration::from_secs(6)).ok_or("lost the renderer")?;
@@ -173,30 +188,8 @@ pub fn run(file: &Path, m: &Monitor) -> Result<(), String> {
 /// Steady-state cost of playing `file` with optional extra mpv options.
 /// Touches nothing persistent: no wallpaper change, window destroyed after.
 pub fn measure_playback(file: &Path, m: &Monitor, extra: &[String], secs: u64) -> Result<(), String> {
-    let file = std::path::absolute(file).map_err(|e| e.to_string())?;
-    let host = DesktopHost::acquire().map_err(|e| e.to_string())?;
-    let win = host.create_window(m.bounds).map_err(|e| e.to_string())?;
-    let mut cmd = Command::new(render_exe()?);
-    cmd.args(["--wid", &win.raw().to_string(), "--file"]).arg(&file).arg("--show-on-ready");
-    for o in extra {
-        cmd.args(["--mpv-opt", o]);
-    }
-    let spawned = Instant::now();
-    let mut child = cmd.stdin(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| e.to_string())?;
+    let Playing { mut child, first_frame_ms: first_ms, .. } = start(file, m, extra)?;
     let pid = child.id();
-
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !win.is_visible() && Instant::now() < deadline {
-        pump_for(Duration::from_millis(20));
-        if let Ok(Some(st)) = child.try_wait() {
-            let mut err = String::new();
-            if let Some(mut e) = child.stderr.take() {
-                let _ = std::io::Read::read_to_string(&mut e, &mut err);
-            }
-            return Err(format!("renderer exited early ({st}): {}", err.trim()));
-        }
-    }
-    let first_ms = spawned.elapsed().as_millis();
     pump_for(Duration::from_secs(4));
     let r = measure(pid, Duration::from_secs(secs));
     send(&mut child, "quit");

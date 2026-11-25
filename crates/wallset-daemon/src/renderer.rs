@@ -67,12 +67,9 @@ pub struct Launch<'a> {
     pub exe: &'a Path,
     pub wid: isize,
     pub file: &'a Path,
-    pub fit: &'static str,
     pub start_secs: Option<f64>,
-    pub adapter: Option<&'a str>,
-    pub hardware_decode: bool,
-    pub low_power: bool,
-    pub efficiency_mode: bool,
+    /// From `RenderSettings::renderer_args`.
+    pub args: Vec<String>,
     pub stderr_log: Option<&'a Path>,
 }
 
@@ -98,21 +95,10 @@ impl Renderer {
         let mut cmd = Command::new(l.exe);
         cmd.args(["--wid", &l.wid.to_string(), "--file"])
             .arg(l.file)
-            .args(["--fit", l.fit, "--show-on-ready"]);
+            .arg("--show-on-ready")
+            .args(&l.args);
         if let Some(s) = l.start_secs {
             cmd.args(["--start", &format!("{s:.3}")]);
-        }
-        if let Some(a) = l.adapter {
-            cmd.args(["--adapter", a]);
-        }
-        if !l.hardware_decode {
-            cmd.arg("--no-hwdec");
-        }
-        if !l.low_power {
-            cmd.arg("--quality");
-        }
-        if !l.efficiency_mode {
-            cmd.arg("--foreground");
         }
         let stderr = match l.stderr_log {
             Some(p) => std::fs::OpenOptions::new().create(true).append(true).open(p).map(Stdio::from).unwrap_or_else(|_| Stdio::null()),

@@ -293,7 +293,6 @@ impl Daemon {
                 session_locked: sig.locked,
                 on_battery: sig.on_battery,
                 battery_percent: sig.battery_pct,
-                media_is_video: true,
                 user_paused: sig.user_paused,
             };
             if let Some(t) = slot.engine.update(&inputs, now) {
@@ -344,12 +343,8 @@ impl Daemon {
             exe: &self.render_exe,
             wid: slot.window.raw(),
             file: &slot.assignment.path,
-            fit: slot.assignment.fit.as_arg(),
             start_secs: slot.resume_pos,
-            adapter: self.adapter.as_deref(),
-            hardware_decode: self.cfg.render.hardware_decode,
-            low_power: self.cfg.render.low_power,
-            efficiency_mode: self.cfg.render.efficiency_mode,
+            args: self.cfg.render.renderer_args(slot.assignment.fit, self.adapter.as_deref()),
             stderr_log: Some(&stderr_log),
         };
         match Renderer::spawn(&launch, &self.job) {

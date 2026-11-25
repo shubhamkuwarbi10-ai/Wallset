@@ -3092,7 +3092,6 @@ dependencies = [
 name = "wallset-daemon"
 version = "0.1.0"
 dependencies = [
- "serde_json",
  "wallset-core",
  "wallset-display",
  "wallset-surface",
@@ -3143,7 +3142,6 @@ dependencies = [
  "eframe",
  "raw-window-handle",
  "rfd",
- "serde_json",
  "wallset-core",
  "wallset-display",
  "wallset-media",

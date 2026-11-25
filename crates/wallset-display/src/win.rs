@@ -48,8 +48,6 @@ struct DxgiOutput {
     red: [f32; 2],
     green: [f32; 2],
     blue: [f32; 2],
-    white: [f32; 2],
-    min_lum: f32,
     max_lum: f32,
     max_full_frame_lum: f32,
     adapter: AdapterInfo,
@@ -93,7 +91,7 @@ fn build_monitor(
     dx: Option<&DxgiOutput>,
     cc: Option<&CcdPath>,
 ) -> Monitor {
-    let (current, native, max_refresh) = gdi_modes(device);
+    let (current, native) = gdi_modes(device);
 
     // CCD gives the exact rational refresh (59.94); GDI only gives integers.
     let mut current_mode = current.unwrap_or(Mode {
@@ -124,11 +122,9 @@ fn build_monitor(
                 hdr_enabled: cc.and_then(|c| c.hdr_enabled).unwrap_or(d.hdr_colorspace),
                 max_luminance_nits: lum(d.max_lum),
                 max_full_frame_luminance_nits: lum(d.max_full_frame_lum),
-                min_luminance_nits: lum(d.min_lum),
                 red: xy(d.red),
                 green: xy(d.green),
                 blue: xy(d.blue),
-                white: xy(d.white),
             }
         }
         None => ColorCapabilities {
@@ -137,18 +133,15 @@ fn build_monitor(
             hdr_enabled: cc.and_then(|c| c.hdr_enabled).unwrap_or(false),
             max_luminance_nits: None,
             max_full_frame_luminance_nits: None,
-            min_luminance_nits: None,
             red: None,
             green: None,
             blue: None,
-            white: None,
         },
     };
 
     let adapter = dx.map(|d| d.adapter.clone()).unwrap_or(AdapterInfo {
         name: "Unknown adapter".into(),
         dedicated_video_memory_bytes: 0,
-        shared_system_memory_bytes: 0,
         is_software: false,
     });
 
@@ -178,7 +171,6 @@ fn build_monitor(
         bounds: dx.map_or(gdi_bounds, |d| d.bounds),
         current_mode,
         native_mode: native,
-        max_refresh_hz: max_refresh,
         dpi,
         scale,
         color,
@@ -223,8 +215,8 @@ fn gdi_monitors() -> Vec<(String, HMONITOR, Rect, bool)> {
         .collect()
 }
 
-/// Returns (current mode, native mode, highest refresh at native resolution).
-fn gdi_modes(device: &str) -> (Option<Mode>, Option<Mode>, Option<f64>) {
+/// Returns (current mode, native mode).
+fn gdi_modes(device: &str) -> (Option<Mode>, Option<Mode>) {
     let wide: Vec<u16> = device.encode_utf16().chain(std::iter::once(0)).collect();
     let name = PCWSTR(wide.as_ptr());
 
@@ -259,8 +251,7 @@ fn gdi_modes(device: &str) -> (Option<Mode>, Option<Mode>, Option<f64>) {
             break; // Defensive bound against a misbehaving driver.
         }
     }
-    let max_refresh = native.map(|n| n.refresh_hz);
-    (current, native, max_refresh)
+    (current, native)
 }
 
 fn monitor_dpi(hmon: HMONITOR) -> (u32, f32) {
@@ -307,8 +298,6 @@ fn dxgi_outputs() -> windows::core::Result<HashMap<String, DxgiOutput>> {
                     red: d.RedPrimary,
                     green: d.GreenPrimary,
                     blue: d.BluePrimary,
-                    white: d.WhitePoint,
-                    min_lum: d.MinLuminance,
                     max_lum: d.MaxLuminance,
                     max_full_frame_lum: d.MaxFullFrameLuminance,
                     adapter: adapter_info.clone(),
@@ -325,13 +314,11 @@ fn adapter_info(adapter: &IDXGIAdapter1) -> AdapterInfo {
         Ok(d) => AdapterInfo {
             name: wide_to_string(&d.Description),
             dedicated_video_memory_bytes: d.DedicatedVideoMemory as u64,
-            shared_system_memory_bytes: d.SharedSystemMemory as u64,
             is_software: (d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32) != 0,
         },
         Err(_) => AdapterInfo {
             name: "Unknown adapter".into(),
             dedicated_video_memory_bytes: 0,
-            shared_system_memory_bytes: 0,
             is_software: false,
         },
     }

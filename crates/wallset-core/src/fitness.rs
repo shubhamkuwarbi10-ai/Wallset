@@ -129,17 +129,6 @@ impl FitnessReport {
     pub fn worst(&self) -> Option<Severity> {
         self.findings.iter().map(|f| f.severity).max()
     }
-
-    /// True when nothing above `Advice` was found.
-    #[must_use]
-    pub fn is_clean(&self) -> bool {
-        self.worst().is_none_or(|s| s <= Severity::Advice)
-    }
-
-    #[must_use]
-    pub fn count_at_least(&self, min: Severity) -> usize {
-        self.findings.iter().filter(|f| f.severity >= min).count()
-    }
 }
 
 /// Analyse a media file against the monitor it is destined for.
@@ -510,7 +499,7 @@ fn check_monitor_native_mode(monitor: &Monitor, out: &mut Vec<Finding>) {
         ));
     }
 
-    if let Some(max) = monitor.max_refresh_hz
+    if let Some(max) = monitor.max_refresh_hz()
         && max > monitor.current_mode.refresh_hz + 1.0
     {
         out.push(Finding::new(
@@ -607,7 +596,6 @@ mod tests {
             bounds: Rect { x: 0, y: 0, width: 1920, height: 1080 },
             current_mode: Mode { width: 1920, height: 1080, refresh_hz: 60.0 },
             native_mode: Some(Mode { width: 1920, height: 1080, refresh_hz: 60.0 }),
-            max_refresh_hz: Some(60.0),
             dpi: 96,
             scale: 1.0,
             color: ColorCapabilities {
@@ -616,16 +604,13 @@ mod tests {
                 hdr_enabled: false,
                 max_luminance_nits: None,
                 max_full_frame_luminance_nits: None,
-                min_luminance_nits: None,
                 red: Some(XyChromaticity::new(0.640, 0.330)),
                 green: Some(XyChromaticity::new(0.300, 0.600)),
                 blue: Some(XyChromaticity::new(0.150, 0.060)),
-                white: Some(XyChromaticity::new(0.3127, 0.3290)),
             },
             adapter: AdapterInfo {
                 name: "Test GPU".into(),
                 dedicated_video_memory_bytes: 4 << 30,
-                shared_system_memory_bytes: 8 << 30,
                 is_software: false,
             },
         }
@@ -635,7 +620,6 @@ mod tests {
         let mut m = sdr_1080p_monitor();
         m.current_mode = Mode { width: 3840, height: 2160, refresh_hz: 144.0 };
         m.native_mode = Some(m.current_mode);
-        m.max_refresh_hz = Some(144.0);
         m.bounds = Rect { x: 0, y: 0, width: 3840, height: 2160 };
         m.color.hdr_supported = true;
         m.color.hdr_enabled = true;
@@ -656,7 +640,6 @@ mod tests {
             fps: Some(30.0),
             duration_secs: Some(20.0),
             file_size_bytes: 10 << 20,
-            bitrate_bps: Some(4_000_000),
             transfer: ColorTransfer::Sdr,
             primaries: SourcePrimaries::Bt709,
             hwdec: Some("d3d11va".into()),
@@ -667,7 +650,7 @@ mod tests {
     #[test]
     fn a_well_matched_file_produces_a_clean_report() {
         let r = analyse(&h264_1080p(), &sdr_1080p_monitor());
-        assert!(r.is_clean(), "unexpected findings: {:#?}", r.findings);
+        assert!(r.worst() <= Some(Severity::Advice), "unexpected findings: {:#?}", r.findings);
         assert!(!r.estimate.exceeds_budget);
     }
 

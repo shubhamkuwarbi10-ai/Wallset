@@ -37,7 +37,7 @@ use windows::Win32::UI::Shell::{DWPOS_FILL, DesktopWallpaper, IDesktopWallpaper}
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, EnumWindows,
     FindWindowExW, FindWindowW, GetClassNameW, GetWindow, GW_CHILD, GW_HWNDNEXT, HTTRANSPARENT,
-    IsWindow, IsWindowVisible, RegisterClassExW, SMTO_NORMAL, SW_HIDE, SW_SHOWNOACTIVATE,
+    IsWindowVisible, RegisterClassExW, SMTO_NORMAL, SW_HIDE, SW_SHOWNOACTIVATE,
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendMessageTimeoutW, SetWindowPos, ShowWindow,
     WM_NCHITTEST, WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_NOACTIVATE,
     WS_EX_TRANSPARENT, WS_VISIBLE,
@@ -120,13 +120,6 @@ impl DesktopHost {
     #[must_use]
     pub const fn layout(&self) -> DesktopLayout {
         self.layout
-    }
-
-    /// Whether the handles are still valid. False after Explorer restarts.
-    #[must_use]
-    pub fn is_alive(&self) -> bool {
-        // SAFETY: IsWindow is safe on any value.
-        unsafe { IsWindow(Some(self.parent)) }.as_bool()
     }
 
     /// Create a hidden wallpaper window covering `bounds` (virtual-desktop
@@ -246,23 +239,6 @@ impl HostWindow {
     pub fn is_visible(&self) -> bool {
         // SAFETY: our own window.
         unsafe { IsWindowVisible(self.hwnd) }.as_bool()
-    }
-
-    /// Move/resize after a display topology change.
-    pub fn reposition(&self, host: &DesktopHost, bounds: Rect) {
-        let (x, y) = host.to_parent_coords(bounds);
-        // SAFETY: our own window.
-        unsafe {
-            let _ = SetWindowPos(
-                self.hwnd,
-                self.insert_below,
-                x,
-                y,
-                bounds.width as i32,
-                bounds.height as i32,
-                SWP_NOACTIVATE | if self.insert_below.is_none() { SWP_NOZORDER } else { Default::default() },
-            );
-        }
     }
 
     /// In the Raised layout, keep our window directly beneath the icon layer
