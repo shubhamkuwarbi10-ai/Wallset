@@ -22,7 +22,6 @@ const WARMUP: Duration = Duration::from_secs(3);
 pub struct Measured {
     pub cpu_percent: f64,
     pub private_mb: f64,
-    pub working_set_mb: f64,
     pub over_secs: f64,
 }
 
@@ -102,7 +101,6 @@ impl Preview {
         self.measured = Some(Measured {
             cpu_percent: now.cpu_percent_since(&base, over),
             private_mb: now.private_bytes as f64 / 1_048_576.0,
-            working_set_mb: now.working_set_bytes as f64 / 1_048_576.0,
             over_secs: over.as_secs_f64(),
         });
     }
